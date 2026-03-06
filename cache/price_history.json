@@ -1,0 +1,463 @@
+{
+  "sony wh-1000xm5": [
+    {
+      "ts": 1772576564,
+      "retailer": "amazon",
+      "price": 279.99
+    },
+    {
+      "ts": 1772576564,
+      "retailer": "walmart",
+      "price": 289.99
+    },
+    {
+      "ts": 1772833480,
+      "retailer": "target",
+      "price": 399.99
+    }
+  ],
+  "sony wh-1000xm5 wireless headphones": [
+    {
+      "ts": 1772577427,
+      "retailer": "amazon",
+      "price": 279.99
+    },
+    {
+      "ts": 1772577427,
+      "retailer": "walmart",
+      "price": 289.0
+    },
+    {
+      "ts": 1772577427,
+      "retailer": "target",
+      "price": 299.99
+    },
+    {
+      "ts": 1772577427,
+      "retailer": "amazon",
+      "price": 279.99
+    },
+    {
+      "ts": 1772577427,
+      "retailer": "walmart",
+      "price": 289.0
+    },
+    {
+      "ts": 1772577427,
+      "retailer": "target",
+      "price": 299.99
+    },
+    {
+      "ts": 1772577427,
+      "retailer": "amazon",
+      "price": 279.99
+    },
+    {
+      "ts": 1772577427,
+      "retailer": "walmart",
+      "price": 289.0
+    },
+    {
+      "ts": 1772577427,
+      "retailer": "target",
+      "price": 299.99
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 279.99
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "walmart",
+      "price": 289.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "target",
+      "price": 299.99
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 279.99
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "walmart",
+      "price": 289.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "target",
+      "price": 299.99
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 279.99
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "walmart",
+      "price": 289.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "target",
+      "price": 299.99
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 279.99
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "walmart",
+      "price": 289.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "target",
+      "price": 299.99
+    }
+  ],
+  "test headphones v2": [
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 199.99
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "walmart",
+      "price": 209.99
+    }
+  ],
+  "popular product": [
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 100.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 101.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 102.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 103.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 104.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 105.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 106.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 107.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 108.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 109.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 110.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 111.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 112.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 113.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 114.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 115.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 116.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 117.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 118.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 119.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 120.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 121.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 122.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 123.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 124.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 125.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 126.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 127.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 128.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 129.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 130.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 131.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 132.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 133.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 134.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 135.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 136.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 137.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 138.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 139.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 140.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 141.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 142.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 143.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 144.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 145.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 146.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 147.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 148.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 149.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 150.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 151.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 152.0
+    },
+    {
+      "ts": 1772577428,
+      "retailer": "amazon",
+      "price": 153.0
+    },
+    {
+      "ts": 1772577429,
+      "retailer": "amazon",
+      "price": 154.0
+    },
+    {
+      "ts": 1772577429,
+      "retailer": "amazon",
+      "price": 155.0
+    },
+    {
+      "ts": 1772577429,
+      "retailer": "amazon",
+      "price": 156.0
+    },
+    {
+      "ts": 1772577429,
+      "retailer": "amazon",
+      "price": 157.0
+    },
+    {
+      "ts": 1772577429,
+      "retailer": "amazon",
+      "price": 158.0
+    },
+    {
+      "ts": 1772577429,
+      "retailer": "amazon",
+      "price": 159.0
+    }
+  ],
+  "budget speaker": [
+    {
+      "ts": 1772577429,
+      "retailer": "amazon",
+      "price": 49.99
+    }
+  ],
+  "gaming mouse": [
+    {
+      "ts": 1772577429,
+      "retailer": "amazon",
+      "price": 39.99
+    }
+  ],
+  "for iphone 15 pro max case with magnetic ring stand  [compatible with magsafe] four corners shockproof [military grade drop protection] luxury slim kickstand clear case for iphone 15 pro max  red": [],
+  "iphone 15 pro max": [
+    {
+      "ts": 1772830302,
+      "retailer": "target",
+      "price": 27.49
+    }
+  ],
+  "iphien 15 pro max": []
+}
