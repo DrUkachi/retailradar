@@ -7,7 +7,7 @@ import uvicorn
 from contextlib import asynccontextmanager
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, RedirectResponse
 from starlette.requests import Request
 from starlette.types import Receive, Scope, Send
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
@@ -19,13 +19,6 @@ session_manager = StreamableHTTPSessionManager(
     json_response=True,
     stateless=True,
 )
-
-# ── ASGI handler — must use Mount, not Route ──────────────────────────────────
-# Route expects a Response to be returned. StreamableHTTPSessionManager.handle_request
-# is a raw ASGI callable that writes directly to the send channel and returns None.
-# Using Route causes "NoneType is not callable". Mount handles raw ASGI apps correctly.
-async def handle_mcp(scope: Scope, receive: Receive, send: Send) -> None:
-    await session_manager.handle_request(scope, receive, send)
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 @asynccontextmanager
@@ -51,21 +44,37 @@ async def debug(request: Request):
         "redcircle_preview":  redcircle_key[:8]  + "..." if redcircle_key  else "EMPTY",
     })
 
-# Wrap handle_mcp to also work as a Starlette Route endpoint
-# This avoids the 307 redirect that Mount("/mcp") causes when clients hit /mcp without trailing slash
-async def mcp_endpoint(request: Request):
-    await session_manager.handle_request(request.scope, request.receive, request._send)
-
-app = Starlette(
+# ── Build inner Starlette app (health + debug only) ───────────────────────────
+inner_app = Starlette(
     lifespan=lifespan,
     routes=[
-        Route("/health", endpoint=health_check,  methods=["GET"]),
-        Route("/debug",  endpoint=debug,          methods=["GET"]),
-        Route("/mcp",    endpoint=mcp_endpoint,   methods=["GET", "POST", "DELETE"]),
-        Mount("/mcp",    app=handle_mcp),          # catches /mcp/* subpaths
+        Route("/health", endpoint=health_check, methods=["GET"]),
+        Route("/debug",  endpoint=debug,         methods=["GET"]),
     ],
 )
 
+# ── Outer ASGI wrapper — intercepts /mcp before Starlette sees it ─────────────
+# This avoids the Route vs Mount NoneType conflict entirely.
+# Any path starting with /mcp goes straight to the session manager.
+# Everything else falls through to the Starlette app.
+class MCPRouter:
+    def __init__(self, mcp_handler, fallback):
+        self.mcp_handler = mcp_handler
+        self.fallback     = fallback
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] == "http":
+            path = scope.get("path", "")
+            if path == "/mcp" or path.startswith("/mcp/"):
+                await self.mcp_handler(scope, receive, send)
+                return
+        await self.fallback(scope, receive, send)
+
+async def handle_mcp(scope: Scope, receive: Receive, send: Send):
+    await session_manager.handle_request(scope, receive, send)
+
+app = MCPRouter(mcp_handler=handle_mcp, fallback=inner_app)
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run("app:app", host="0.0.0.0", port=port)
