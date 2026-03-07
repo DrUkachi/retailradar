@@ -51,12 +51,18 @@ async def debug(request: Request):
         "redcircle_preview":  redcircle_key[:8]  + "..." if redcircle_key  else "EMPTY",
     })
 
+# Wrap handle_mcp to also work as a Starlette Route endpoint
+# This avoids the 307 redirect that Mount("/mcp") causes when clients hit /mcp without trailing slash
+async def mcp_endpoint(request: Request):
+    await session_manager.handle_request(request.scope, request.receive, request._send)
+
 app = Starlette(
     lifespan=lifespan,
     routes=[
-        Route("/health", endpoint=health_check, methods=["GET"]),
-        Route("/debug",  endpoint=debug,         methods=["GET"]),
-        Mount("/mcp",    app=handle_mcp),          # Mount, not Route — handles raw ASGI
+        Route("/health", endpoint=health_check,  methods=["GET"]),
+        Route("/debug",  endpoint=debug,          methods=["GET"]),
+        Route("/mcp",    endpoint=mcp_endpoint,   methods=["GET", "POST", "DELETE"]),
+        Mount("/mcp",    app=handle_mcp),          # catches /mcp/* subpaths
     ],
 )
 
