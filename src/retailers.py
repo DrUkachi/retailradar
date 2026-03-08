@@ -148,19 +148,31 @@ async def fetch_walmart(search_term: str, upc: Optional[str], zip_code: str) -> 
 
             data = resp.json()
 
-            organic = data.get("organic_results", [])
+            # ScraperAPI returns results under 'organic_results' or 'items' depending on version
+            organic = data.get("organic_results") or data.get("items") or []
             if not organic:
-                # Return keys present so we can debug what ScraperAPI actually returned
                 keys = list(data.keys()) if isinstance(data, dict) else []
                 return {"error": f"No Walmart results found (response keys: {keys})"}
 
             top = organic[0]
+            # 'name' or 'title' depending on endpoint version
+            title    = top.get("name") or top.get("title") or ""
+            # price can be a number or a string like "$279.99"
+            raw_price = top.get("price") or top.get("sale_price") or ""
+            # in_stock can come from several fields
+            in_stock = (
+                top.get("available_for_delivery")
+                or top.get("in_stock")
+                or top.get("availabilityStatus", "").lower() == "in_stock"
+                or True  # default to True if field missing
+            )
+            url_path = top.get("url") or top.get("product_url") or ""
             return {
-                "title":    top.get("name", ""),
-                "price":    _parse_price(str(top.get("price", ""))),
+                "title":    title,
+                "price":    _parse_price(str(raw_price)),
                 "currency": "USD",
-                "in_stock": top.get("available_for_delivery", True),
-                "url":      f"https://www.walmart.com{top['url']}" if top.get("url") else walmart_search_url,
+                "in_stock": bool(in_stock),
+                "url":      f"https://www.walmart.com{url_path}" if url_path.startswith("/") else (url_path or walmart_search_url),
             }
 
     except httpx.TimeoutException:
