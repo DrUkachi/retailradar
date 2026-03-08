@@ -244,20 +244,35 @@ class ProductMatcher:
 
     def _is_accessory_mismatch(self, query: str, retailer_title: str) -> bool:
         """
-        Returns True if the retailer result appears to be an accessory
-        but the user query is not asking for one.
+        Returns True ONLY if the retailer result is clearly an accessory
+        for the queried product — i.e. the result shares the product name
+        but adds an accessory keyword.
 
-        How it works:
-          - Loops through every word in ACCESSORY_KEYWORDS
-          - If the retailer title contains that word AND the user query does not
-            contain that word, the result is an accessory mismatch
-          - Example: query="iphone 15 pro max", title="iPhone 15 Pro Max Case"
-            -> "case" is in title but not in query -> mismatch -> return True
-          - Example: query="iphone 15 pro max case", title="iPhone 15 Pro Max Case"
-            -> "case" is in both -> user wants a case -> return False
+        Requires BOTH conditions:
+          1. The retailer title contains an accessory keyword (case, cable, etc.)
+          2. The retailer title also contains at least one significant word
+             from the query (proving it's related to the right product)
+          3. The query itself does NOT contain that accessory keyword
+
+        This prevents false positives where a completely unrelated product
+        (e.g. AirPods returned for a Sony headphones query) gets flagged
+        as an accessory mismatch — that case should just score LOW.
         """
         query_lower = query.lower()
         title_lower = retailer_title.lower()
+
+        # Extract meaningful query words (3+ chars, not stopwords)
+        stopwords = {"the", "for", "and", "with", "gen", "new"}
+        query_words = [w for w in re.findall(r"[a-z0-9]+", query_lower)
+                       if len(w) >= 3 and w not in stopwords]
+
+        # Check if the title shares meaningful words with the query
+        title_contains_query_words = any(w in title_lower for w in query_words)
+
+        # Only flag as accessory mismatch if the title is related to the query product
+        if not title_contains_query_words:
+            return False  # completely unrelated product — let fuzzy score handle it
+
         for keyword in ACCESSORY_KEYWORDS:
             if keyword in title_lower and keyword not in query_lower:
                 return True
