@@ -122,7 +122,8 @@ def _parse_amazon_search_result(result: dict) -> dict:
 
 async def fetch_walmart(search_term: str, upc: Optional[str], zip_code: str) -> dict:
     """
-    Fetches Walmart product data via ScraperAPI (renders JS, bypasses bot detection).
+    Fetches Walmart product data via ScraperAPI structured endpoint.
+    Uses a longer timeout (25s) since ScraperAPI can be slow on first request.
     """
     if not SCRAPERAPI_KEY:
         return {"error": "SCRAPERAPI_KEY not configured"}
@@ -131,21 +132,27 @@ async def fetch_walmart(search_term: str, upc: Optional[str], zip_code: str) -> 
     walmart_search_url = f"https://www.walmart.com/search?q={query.replace(' ', '+')}"
 
     try:
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-            # ScraperAPI structured data endpoint for Walmart
+        async with httpx.AsyncClient(timeout=25) as client:
             resp = await client.get(
                 "https://api.scraperapi.com/structured/walmart/search",
                 params={
-                    "api_key":    SCRAPERAPI_KEY,
-                    "query":      query,
+                    "api_key":      SCRAPERAPI_KEY,
+                    "query":        query,
                     "country_code": "us",
                 },
             )
+
+            # Non-200 means API key issue or rate limit
+            if resp.status_code != 200:
+                return {"error": f"Walmart API error: HTTP {resp.status_code}"}
+
             data = resp.json()
 
             organic = data.get("organic_results", [])
             if not organic:
-                return {"error": "No Walmart results found"}
+                # Return keys present so we can debug what ScraperAPI actually returned
+                keys = list(data.keys()) if isinstance(data, dict) else []
+                return {"error": f"No Walmart results found (response keys: {keys})"}
 
             top = organic[0]
             return {
@@ -157,7 +164,7 @@ async def fetch_walmart(search_term: str, upc: Optional[str], zip_code: str) -> 
             }
 
     except httpx.TimeoutException:
-        return {"error": "Walmart request timed out"}
+        return {"error": "Walmart request timed out after 25s — ScraperAPI may be slow"}
     except Exception as e:
         return {"error": f"Walmart fetch error: {str(e)}"}
 
