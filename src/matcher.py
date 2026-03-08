@@ -190,6 +190,14 @@ class ProductMatcher:
                 )
             )
 
+        # Hard reject: score below 25 means completely wrong product
+        # (e.g. AirPods returned for a Sony headphones query scores ~18)
+        MINIMUM_SCORE = 25
+        if score < MINIMUM_SCORE:
+            return self._not_found(
+                note=f"Result rejected: fuzzy score {score:.0f} below minimum threshold. Got: '{retailer_title[:60]}'"
+            )
+
         # Assign confidence
         if score >= FUZZY_HIGH_THRESHOLD and not variant_warning:
             confidence = "HIGH"
@@ -198,17 +206,18 @@ class ProductMatcher:
         else:
             confidence = "LOW"
 
-        note = variant_warning or None
+        # note is empty string (not null) so CTX validator doesn't flag it as suspicious null
+        note = variant_warning or ""
 
         return {
-            "price":      raw.get("price"),
-            "currency":   raw.get("currency", "USD"),
-            "in_stock":   raw.get("in_stock"),
-            "url":        raw.get("url"),
-            "title":      retailer_title,
-            "confidence": confidence,
+            "price":       raw.get("price"),
+            "currency":    raw.get("currency", "USD"),
+            "in_stock":    raw.get("in_stock"),
+            "url":         raw.get("url"),
+            "title":       retailer_title,
+            "confidence":  confidence,
             "fuzzy_score": score,
-            "note":       note,
+            "note":        note,
         }
 
     def _fuzzy_score(self, a: str, b: str) -> int:
@@ -282,10 +291,10 @@ class ProductMatcher:
         return {
             "price":       None,
             "currency":    "USD",
-            "in_stock":    None,
-            "url":         None,
-            "title":       None,
+            "in_stock":    False,
+            "url":         "",
+            "title":       "",
             "confidence":  "NOT_FOUND",
             "fuzzy_score": 0,
-            "note":        note or "Product not found on this retailer",
+            "note":        note or "Product not found at this retailer",
         }
