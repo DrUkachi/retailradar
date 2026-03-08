@@ -135,9 +135,9 @@ async def list_tools() -> list[types.Tool]:
                     "product_name":      {"type": "string"},
                     "match_confidence":  {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
                     "retailers_found":   {"type": "integer", "description": "Number of retailers (0-3) that returned a valid price. Use this to know if data is complete."},
-                    "amazon":            {"type": "object", "description": "Amazon result. Check confidence field: HIGH/MEDIUM/LOW means price found, NOT_FOUND means no result."},
-                    "walmart":           {"type": "object", "description": "Walmart result. Check confidence field: HIGH/MEDIUM/LOW means price found, NOT_FOUND means no result."},
-                    "target":            {"type": "object", "description": "Target result. Check confidence field: HIGH/MEDIUM/LOW means price found, NOT_FOUND means no result."},
+                    "amazon":            {"type": ["object", "null"], "description": "Amazon price result object, or null if Amazon had no matching product."},
+                    "walmart":           {"type": ["object", "null"], "description": "Walmart price result object, or null if Walmart had no matching product."},
+                    "target":            {"type": ["object", "null"], "description": "Target price result object, or null if Target had no matching product."},
                     "cheapest_retailer": {"type": "string", "description": "Name of cheapest retailer. Empty string if no prices found."},
                     "cheapest_price":    {"type": "number", "description": "Cheapest price found. 0 if no prices found."},
                     "price_spread_pct":  {"type": "number", "description": "Percentage difference between highest and lowest price. 0 when fewer than 2 retailers returned prices."},
@@ -363,13 +363,18 @@ async def handle_compare_prices(arguments: dict) -> dict:
     # so it knows the response is complete and stops retrying
     retailers_found = sum(1 for r in [amazon, walmart, target] if r.get("price") is not None)
 
+    # Return null for entire retailer object when NOT_FOUND
+    # This prevents CTX from flagging {price: null, ...} as a suspicious null
+    def retailer_or_null(r):
+        return r if r.get("confidence") != "NOT_FOUND" else None
+
     return {
         "product_name":      canonical_name,
         "match_confidence":  overall,
         "retailers_found":   retailers_found,
-        "amazon":            amazon,
-        "walmart":           walmart,
-        "target":            target,
+        "amazon":            retailer_or_null(amazon),
+        "walmart":           retailer_or_null(walmart),
+        "target":            retailer_or_null(target),
         "cheapest_retailer": cheapest_retailer or "",
         "cheapest_price":    cheapest_price or 0,
         "price_spread_pct":  price_spread_pct or 0,
