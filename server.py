@@ -134,12 +134,13 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "product_name":      {"type": "string"},
                     "match_confidence":  {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
-                    "amazon":            {"type": "object"},
-                    "walmart":           {"type": "object"},
-                    "target":            {"type": "object"},
-                    "cheapest_retailer": {"type": ["string", "null"]},
-                    "cheapest_price":    {"type": ["number", "null"]},
-                    "price_spread_pct":  {"type": ["number", "null"], "description": "Percentage difference between highest and lowest price. Null when fewer than 2 retailers returned prices"},
+                    "retailers_found":   {"type": "integer", "description": "Number of retailers (0-3) that returned a valid price. Use this to know if data is complete."},
+                    "amazon":            {"type": "object", "description": "Amazon result. Check confidence field: HIGH/MEDIUM/LOW means price found, NOT_FOUND means no result."},
+                    "walmart":           {"type": "object", "description": "Walmart result. Check confidence field: HIGH/MEDIUM/LOW means price found, NOT_FOUND means no result."},
+                    "target":            {"type": "object", "description": "Target result. Check confidence field: HIGH/MEDIUM/LOW means price found, NOT_FOUND means no result."},
+                    "cheapest_retailer": {"type": "string", "description": "Name of cheapest retailer. Empty string if no prices found."},
+                    "cheapest_price":    {"type": "number", "description": "Cheapest price found. 0 if no prices found."},
+                    "price_spread_pct":  {"type": "number", "description": "Percentage difference between highest and lowest price. 0 when fewer than 2 retailers returned prices."},
                     "deal_score":        {"type": "integer", "minimum": 0, "maximum": 10},
                     "verdict":           {"type": "string"},
                     "disclaimer":        {"type": "string"},
@@ -358,20 +359,24 @@ async def handle_compare_prices(arguments: dict) -> dict:
     else:
         overall = "LOW"
 
+    # retailers_found tells CTX exactly how many retailers returned data
+    # so it knows the response is complete and stops retrying
+    retailers_found = sum(1 for r in [amazon, walmart, target] if r.get("price") is not None)
+
     return {
         "product_name":      canonical_name,
-        "upc":               upc,
         "match_confidence":  overall,
+        "retailers_found":   retailers_found,
         "amazon":            amazon,
         "walmart":           walmart,
         "target":            target,
-        "cheapest_retailer": cheapest_retailer,
-        "cheapest_price":    cheapest_price,
-        "price_spread_pct":  price_spread_pct,
+        "cheapest_retailer": cheapest_retailer or "",
+        "cheapest_price":    cheapest_price or 0,
+        "price_spread_pct":  price_spread_pct or 0,
         "deal_score":        deal_score,
         "verdict":           verdict,
         "disclaimer": (
-            "Prices queried from a fixed US location (ZIP: 10001). "
+            "Prices queried from a fixed US location. "
             "Final prices may vary by region, membership status (Walmart+, Target Circle), "
             "and real-time availability. Verify before purchasing."
         ),
