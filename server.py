@@ -133,7 +133,6 @@ async def list_tools() -> list[types.Tool]:
                 "type": "object",
                 "properties": {
                     "product_name":      {"type": "string"},
-                    "upc":               {"type": ["string", "null"], "description": "UPC barcode if resolved via lookup, null if product was matched by name only"},
                     "match_confidence":  {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
                     "amazon":            {"type": "object"},
                     "walmart":           {"type": "object"},
