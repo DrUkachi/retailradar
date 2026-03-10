@@ -135,17 +135,18 @@ async def list_tools() -> list[types.Tool]:
                     "product_name":      {"type": "string"},
                     "match_confidence":  {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
                     "retailers_found":   {"type": "integer", "description": "Number of retailers (0-3) that returned a valid price. Use this to know if data is complete."},
-                    "amazon":            {"type": ["object", "null"], "description": "Amazon price result object, or null if Amazon had no matching product."},
-                    "walmart":           {"type": ["object", "null"], "description": "Walmart price result object, or null if Walmart had no matching product."},
-                    "target":            {"type": ["object", "null"], "description": "Target price result object, or null if Target had no matching product."},
+                    "amazon":            {"type": ["object", "null"], "description": "Amazon price result. Contains price, in_stock, url, title, confidence, condition ('new'|'renewed'|'used'). Null if no matching product found."},
+                    "walmart":           {"type": ["object", "null"], "description": "Walmart price result. Contains price, in_stock, url, title, confidence, condition ('new'|'renewed'|'used'). Null if no matching product found."},
+                    "target":            {"type": ["object", "null"], "description": "Target price result. Contains price, in_stock, url, title, confidence, condition ('new'|'renewed'|'used'). Null if no matching product found."},
                     "cheapest_retailer": {"type": "string", "description": "Name of cheapest retailer. Empty string if no prices found."},
                     "cheapest_price":    {"type": "number", "description": "Cheapest price found. 0 if no prices found."},
                     "price_spread_pct":  {"type": "number", "description": "Percentage difference between highest and lowest price. 0 when fewer than 2 retailers returned prices."},
                     "deal_score":        {"type": "integer", "minimum": 0, "maximum": 10},
                     "verdict":           {"type": "string"},
+                    "price_context":     {"type": "string", "description": "Condition warning and market trend note, e.g. if cheapest result is refurbished or prices are at a historic low. Empty string if no context to add."},
                     "disclaimer":        {"type": "string"},
                 },
-                "required": ["product_name", "match_confidence", "deal_score", "verdict", "disclaimer"],
+                "required": ["product_name", "match_confidence", "deal_score", "verdict", "price_context", "disclaimer"],
             },
         ),
 
@@ -322,10 +323,19 @@ async def handle_compare_prices(arguments: dict) -> dict:
     walmart = matcher.score_retailer_result(walmart_raw, canonical_name, brand)
     target  = matcher.score_retailer_result(target_raw,  canonical_name, brand)
 
+    retailer_map = {"amazon": amazon, "walmart": walmart, "target": target}
+
     valid_prices = {
         k: v["price"]
-        for k, v in {"amazon": amazon, "walmart": walmart, "target": target}.items()
+        for k, v in retailer_map.items()
         if isinstance(v.get("price"), (int, float)) and v.get("confidence") in ("HIGH", "MEDIUM")
+    }
+
+    # Also track any found prices regardless of confidence (for condition context + fallback cheapest)
+    all_found_prices = {
+        k: v["price"]
+        for k, v in retailer_map.items()
+        if isinstance(v.get("price"), (int, float)) and v.get("confidence") != "NOT_FOUND"
     }
 
     cache.update(canonical_name, valid_prices)
@@ -341,14 +351,26 @@ async def handle_compare_prices(arguments: dict) -> dict:
             min_p = min(valid_prices.values())
             if max_p > 0:
                 price_spread_pct = round((max_p - min_p) / max_p * 100, 1)
+    elif all_found_prices:
+        # Fall back to LOW confidence so cheapest_retailer is never blank
+        cheapest_retailer = min(all_found_prices, key=all_found_prices.get)
+        cheapest_price    = all_found_prices[cheapest_retailer]
 
     verdict = scorer.generate_verdict(
-        valid_prices=valid_prices,
+        valid_prices=valid_prices or all_found_prices,
         cheapest_retailer=cheapest_retailer,
         cheapest_price=cheapest_price,
         price_spread_pct=price_spread_pct,
         deal_score=deal_score,
         rolling_min=rolling_min,
+    )
+
+    # Condition warning + market trend context sentence
+    price_context = scorer.generate_price_context(
+        valid_prices=all_found_prices,
+        retailer_results=retailer_map,
+        rolling_min=rolling_min,
+        cheapest_price=cheapest_price,
     )
 
     confidences = [amazon["confidence"], walmart["confidence"], target["confidence"]]
@@ -359,14 +381,14 @@ async def handle_compare_prices(arguments: dict) -> dict:
     else:
         overall = "LOW"
 
-    # retailers_found tells CTX exactly how many retailers returned data
-    # so it knows the response is complete and stops retrying
     retailers_found = sum(1 for r in [amazon, walmart, target] if r.get("price") is not None)
 
-    # Return null for entire retailer object when NOT_FOUND
-    # This prevents CTX from flagging {price: null, ...} as a suspicious null
     def retailer_or_null(r):
-        return r if r.get("confidence") != "NOT_FOUND" else None
+        if r.get("confidence") == "NOT_FOUND":
+            return None
+        result = dict(r)
+        result.setdefault("condition", "new")
+        return result
 
     return {
         "product_name":      canonical_name,
@@ -380,12 +402,14 @@ async def handle_compare_prices(arguments: dict) -> dict:
         "price_spread_pct":  price_spread_pct or 0,
         "deal_score":        deal_score,
         "verdict":           verdict,
+        "price_context":     price_context,
         "disclaimer": (
             "Prices queried from a fixed US location. "
             "Final prices may vary by region, membership status (Walmart+, Target Circle), "
             "and real-time availability. Verify before purchasing."
         ),
     }
+
 
 
 async def handle_price_history(arguments: dict) -> dict:
