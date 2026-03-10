@@ -7,16 +7,10 @@ from typing import Optional
 
 
 class DealScorer:
-    """
-    Deal score logic:
-      - Base: how many retailers have this product (coverage score)
-      - Price signal: how far current cheapest price is from rolling minimum
-      - Spread bonus: larger spread = more value in finding the cheapest
-    """
 
     def compute_deal_score(
         self,
-        valid_prices: dict[str, float],
+        valid_prices: dict,
         rolling_min: Optional[float],
     ) -> int:
         if not valid_prices:
@@ -25,29 +19,25 @@ class DealScorer:
         cheapest = min(valid_prices.values())
         score = 0
 
-        # Coverage: 1 point per retailer found, max 3
-        score += min(len(valid_prices), 3)
+        score += min(len(valid_prices), 3)  # coverage: max 3 pts
 
-        # Price vs rolling minimum (up to 6 points)
         if rolling_min and rolling_min > 0:
             pct_above_min = (cheapest - rolling_min) / rolling_min * 100
             if pct_above_min <= 2:
-                score += 6   # at or near all-time observed low
+                score += 5
             elif pct_above_min <= 8:
-                score += 5   # very close to low
+                score += 4
             elif pct_above_min <= 15:
-                score += 3   # reasonably close
+                score += 3
             elif pct_above_min <= 25:
-                score += 2   # somewhat elevated
+                score += 2
             elif pct_above_min <= 40:
-                score += 1   # elevated
+                score += 1
             else:
-                score += 0   # well above historical low
+                score += 0
         else:
-            # No historical data — neutral middle score
-            score += 2
+            score += 2  # no history — neutral
 
-        # Spread bonus: finding cheapest is more valuable when spread is high
         if len(valid_prices) >= 2:
             max_price = max(valid_prices.values())
             if max_price > 0:
@@ -61,7 +51,7 @@ class DealScorer:
 
     def generate_verdict(
         self,
-        valid_prices: dict[str, float],
+        valid_prices: dict,
         cheapest_retailer: Optional[str],
         cheapest_price: Optional[float],
         price_spread_pct: Optional[float],
@@ -77,7 +67,6 @@ class DealScorer:
         parts = []
         retailer_cap = cheapest_retailer.capitalize()
 
-        # Part 1: Cheapest retailer finding
         if len(valid_prices) == 1:
             parts.append(
                 f"{retailer_cap} is the only retailer with a confirmed price match "
@@ -86,7 +75,6 @@ class DealScorer:
         else:
             parts.append(f"{retailer_cap} is cheapest at ${cheapest_price:,.2f}.")
 
-        # Part 2: Spread context
         if price_spread_pct and price_spread_pct >= 5:
             max_retailer = max(valid_prices, key=valid_prices.get)
             max_price    = valid_prices[max_retailer]
@@ -95,7 +83,6 @@ class DealScorer:
                 f"(${max_price:,.2f})."
             )
 
-        # Part 3: Historical context
         if rolling_min and cheapest_price:
             pct_above = (cheapest_price - rolling_min) / rolling_min * 100
             if pct_above <= 2:
@@ -124,7 +111,6 @@ class DealScorer:
                 "(deal score improves over time as price history builds)."
             )
 
-        # Part 4: Deal score summary
         if deal_score >= 8:
             recommendation = "✅ Buy now — this is a strong deal."
         elif deal_score >= 6:
@@ -139,3 +125,62 @@ class DealScorer:
         parts.append(f"Deal Score: {deal_score}/10. {recommendation}")
 
         return " ".join(parts)
+
+    def generate_price_context(
+        self,
+        valid_prices: dict,
+        retailer_results: dict,
+        rolling_min: Optional[float],
+        cheapest_price: Optional[float],
+    ) -> str:
+        """
+        Returns a one-sentence market context note when it adds real value:
+        - Flags when the cheapest result is refurbished vs new prices elsewhere
+        - Notes when prices are at or well above the historical low
+        Empty string if nothing notable to add.
+        """
+        if not valid_prices or not cheapest_price:
+            return ""
+
+        notes = []
+
+        conditions = {
+            retailer: result.get("condition", "new")
+            for retailer, result in retailer_results.items()
+            if result and result.get("price") is not None
+        }
+        has_renewed = any(c in ("renewed", "used") for c in conditions.values())
+        all_new     = all(c == "new" for c in conditions.values())
+
+        if has_renewed and not all_new:
+            renewed_retailers = [r for r, c in conditions.items() if c in ("renewed", "used")]
+            new_retailers     = [r for r, c in conditions.items() if c == "new"]
+            if renewed_retailers and new_retailers:
+                renewed_prices = [valid_prices[r] for r in renewed_retailers if r in valid_prices]
+                new_prices     = [valid_prices[r] for r in new_retailers     if r in valid_prices]
+                if renewed_prices and new_prices:
+                    notes.append(
+                        f"Note: {renewed_retailers[0].capitalize()} is showing a renewed/refurbished listing "
+                        f"at ${min(renewed_prices):,.2f} vs new at ${min(new_prices):,.2f} "
+                        f"at {new_retailers[0].capitalize()}."
+                    )
+            elif renewed_retailers:
+                notes.append(
+                    "Note: The listed price is for a renewed/refurbished unit — "
+                    "new units may be priced higher or unavailable at this retailer."
+                )
+
+        if rolling_min and cheapest_price:
+            pct_above = (cheapest_price - rolling_min) / rolling_min * 100
+            if pct_above <= 2:
+                notes.append(
+                    "Prices are at or near the lowest observed — "
+                    "this may reflect a recent sale or product cycle discount."
+                )
+            elif pct_above > 40:
+                notes.append(
+                    f"Prices are elevated vs the historical low of ${rolling_min:,.2f} — "
+                    "check back during major sale events (Prime Day, Black Friday)."
+                )
+
+        return " ".join(notes)
