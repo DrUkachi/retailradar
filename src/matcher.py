@@ -37,7 +37,7 @@ MINIMUM_FUZZY_SCORE    = 25
 #   "Sony WH-1000XM5"  vs "Sony WH-1000XM4 Headphones"          → ~0.79  ✅ pass
 #   "Sony WH-1000XM5"  vs "Sony WH-1000XM5 Carrying Case"       → ~0.41  ✅ pass (accessory filter handles this)
 #   "Jordan 1 Mid"     vs "Apple AirPods 4 Wireless Earbuds"    → ~0.15  ❌ reject
-SEMANTIC_REJECT_THRESHOLD = 0.35
+SEMANTIC_REJECT_THRESHOLD = 0.60
 
 # ── Load semantic model once at startup ───────────────────────────────────────
 
@@ -209,6 +209,7 @@ class ProductMatcher:
         raw: Any,
         canonical_title: str,
         brand: str | None,
+        requested_size: str | None = None,
     ) -> dict:
         """
         Takes a raw retailer fetch result and returns a normalised dict
@@ -280,7 +281,7 @@ class ProductMatcher:
         else:
             confidence = "LOW"
 
-        note = variant_warning or ""
+        note = variant_warning or size_note or ""
 
         return {
             "price":          raw.get("price"),
@@ -291,7 +292,13 @@ class ProductMatcher:
             "confidence":     confidence,
             "fuzzy_score":    fuzzy_score,
             "semantic_score": round(sem_score, 3) if sem_score is not None else None,
+            "size_match":     size_match,
             "note":           note,
+            # Pass through coupon fields from raw retailer data
+            "coupon_available": raw.get("coupon_available", False),
+            "coupon_text":      raw.get("coupon_text", ""),
+            "coupon_discount":  raw.get("coupon_discount"),
+            "effective_price":  raw.get("effective_price") or raw.get("price"),
         }
 
     def _fuzzy_score(self, a: str, b: str) -> float:
@@ -346,15 +353,52 @@ class ProductMatcher:
                 return True
         return False
 
+    def _check_size_match(self, requested_size: str, title: str) -> bool | None:
+        """
+        Check if the retailer result title confirms the requested size.
+        Normalises US shoe/clothing sizes, numeric sizes, and EU sizes.
+        Returns True if confirmed, False if different size found, None if no size info in title.
+        """
+        def normalise_size(s: str) -> str:
+            s = s.lower().strip()
+            s = re.sub(r"(us|eu|uk|size|sz|women|men|womens|mens|'s)", "", s)
+            s = re.sub(r"[^0-9.]", "", s).strip()
+            # Normalise "11.0" → "11", "9.5" stays "9.5"
+            try:
+                f = float(s)
+                return str(int(f)) if f == int(f) else str(f)
+            except (ValueError, OverflowError):
+                return s
+
+        req_norm  = normalise_size(requested_size)
+        title_low = title.lower()
+
+        # Find all size-like patterns in title: "size 11", "11.0", "US 10.5", etc.
+        size_patterns = re.findall(
+            r"(?:size|sz|us|uk|eu)?\s*(\d{1,2}(?:\.\d)?)",
+            title_low
+        )
+
+        if not size_patterns:
+            return None  # title has no size info — can't confirm or deny
+
+        title_sizes = {normalise_size(s) for s in size_patterns if normalise_size(s)}
+        return req_norm in title_sizes
+
     def _not_found(self, note: str = "") -> dict:
         return {
-            "price":          None,
-            "currency":       "USD",
-            "in_stock":       False,
-            "url":            "",
-            "title":          "",
-            "confidence":     "NOT_FOUND",
-            "fuzzy_score":    0,
-            "semantic_score": None,
-            "note":           note or "Product not found at this retailer",
+            "price":            None,
+            "currency":         "USD",
+            "in_stock":         False,
+            "url":              "",
+            "title":            "",
+            "confidence":       "NOT_FOUND",
+            "fuzzy_score":      0,
+            "semantic_score":   None,
+            "size_match":       None,
+            "coupon_available": False,
+            "coupon_text":      "",
+            "coupon_discount":  None,
+            "effective_price":  None,
+            "note":             note or "Product not found at this retailer",
         }
