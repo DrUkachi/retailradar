@@ -3,7 +3,7 @@ Product Matching Engine
 Five-tier waterfall:
   1. UPC/barcode lookup via UPCitemdb
   2. Model number extraction
-  3. Semantic similarity via sentence-transformers (all-MiniLM-L6-v2)
+  3. Semantic similarity via fastembed (BAAI/bge-small-en-v1.5)
      — catches category mismatches that fuzzy scoring misses
      — e.g. "Air Jordan 1 Low" vs "Apple AirPods 4" are semantically distant
   4. RapidFuzz fuzzy title matching (catches typos, word order)
@@ -46,16 +46,19 @@ _semantic_available = False
 
 def _load_semantic_model():
     """
-    Load sentence-transformers model at startup.
-    Falls back silently if not installed — system continues with fuzzy-only.
-    all-MiniLM-L6-v2 is ~80MB, fast inference, no GPU needed.
+    Load fastembed model at startup. fastembed is PyTorch-free (~50MB),
+    installs fast on Railway, and produces high-quality embeddings via ONNX.
+    Model: BAAI/bge-small-en-v1.5 — 384 dimensions, same as MiniLM.
+    Falls back silently to fuzzy-only if not installed.
     """
     global _semantic_model, _semantic_available
     try:
-        from sentence_transformers import SentenceTransformer
-        _semantic_model = SentenceTransformer("all-MiniLM-L6-v2")
+        from fastembed import TextEmbedding
+        _semantic_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+        # Warm up the model with a dummy encode so first real request is fast
+        list(_semantic_model.embed(["warmup"]))
         _semantic_available = True
-        logger.info("Semantic matcher loaded: all-MiniLM-L6-v2")
+        logger.info("Semantic matcher loaded: BAAI/bge-small-en-v1.5 (fastembed)")
     except Exception as e:
         logger.warning(f"Semantic matcher unavailable (falling back to fuzzy-only): {e}")
         _semantic_available = False
@@ -76,12 +79,16 @@ def semantic_similarity(query: str, result_title: str) -> float | None:
     """
     Returns cosine similarity [0.0–1.0] between query and result title.
     Returns None if semantic model is not available (caller should skip check).
+    fastembed.embed() returns a generator — convert to list to materialise.
     """
     if not _semantic_available or _semantic_model is None:
         return None
     try:
-        embeddings = _semantic_model.encode([query, result_title])
-        return _cosine_similarity(embeddings[0], embeddings[1])
+        import numpy as np
+        embeddings = list(_semantic_model.embed([query, result_title]))
+        vec_a = np.array(embeddings[0])
+        vec_b = np.array(embeddings[1])
+        return _cosine_similarity(vec_a, vec_b)
     except Exception as e:
         logger.warning(f"Semantic similarity failed: {e}")
         return None
