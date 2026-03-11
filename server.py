@@ -1,417 +1,539 @@
 """
-Product Matching Engine
-Five-tier waterfall:
-  1. UPC/barcode lookup via UPCitemdb
-  2. Model number extraction
-  3. Semantic similarity via fastembed (BAAI/bge-small-en-v1.5)
-     — catches category mismatches that fuzzy scoring misses
-     — e.g. "Air Jordan 1 Low" vs "Apple AirPods 4" are semantically distant
-  4. RapidFuzz fuzzy title matching (catches typos, word order)
-  5. Graceful partial result
+Multi-Retailer Price Intelligence Feed
+CTX Protocol MCP Server - Python
 
-The semantic model is loaded ONCE at module import time so Railway's first
-cold-start takes ~3s longer but subsequent requests add only ~5ms each.
-If the model fails to load (e.g. missing package), the system falls back
-gracefully to fuzzy-only matching.
+Tools exposed:
+  1. compare_prices     — full cross-retailer price comparison + deal score
+  2. get_price_history  — rolling price history for a product from local cache
+  3. get_deal_score     — deal score only (fast, lightweight)
+  4. check_availability — stock availability across all three retailers
 """
 
-import re
+import asyncio
+import json
 import os
-import logging
-import httpx
 from typing import Any
-from rapidfuzz import fuzz
 
-logger = logging.getLogger(__name__)
+import mcp.server.stdio
+import mcp.types as types
+from mcp.server.lowlevel import NotificationOptions, Server
+from mcp.server.models import InitializationOptions
 
-UPC_API_BASE = "https://api.upcitemdb.com/prod/trial/lookup"
+from src.matcher import ProductMatcher
+from src.retailers import fetch_amazon, fetch_walmart, fetch_target, fetch_best_buy
+from src.scorer import DealScorer
+from src.cache import PriceCache
 
-FUZZY_HIGH_THRESHOLD   = 80
-FUZZY_MEDIUM_THRESHOLD = 50
-MINIMUM_FUZZY_SCORE    = 25
+server  = Server("price-intelligence-feed")
+matcher = ProductMatcher()
+scorer  = DealScorer()
+cache   = PriceCache()
 
-# Cosine similarity threshold for semantic match.
-# Empirical values using all-MiniLM-L6-v2:
-#   "Air Jordan 1 Low" vs "Nike Men's Air Jordan 1 Low Sneaker"  → ~0.82  ✅ pass
-#   "Air Jordan 1 Low" vs "Apple AirPods 4 Wireless Earbuds"    → ~0.18  ❌ reject
-#   "Sony WH-1000XM5"  vs "Sony WH-1000XM4 Headphones"          → ~0.79  ✅ pass
-#   "Sony WH-1000XM5"  vs "Sony WH-1000XM5 Carrying Case"       → ~0.41  ✅ pass (accessory filter handles this)
-#   "Jordan 1 Mid"     vs "Apple AirPods 4 Wireless Earbuds"    → ~0.15  ❌ reject
-SEMANTIC_REJECT_THRESHOLD = 0.60
+# ── CTX Protocol _meta ────────────────────────────────────────────────────────
+# surface: "query"       = shows up in Context chat app
+# queryEligible: True    = Context app can call this to answer user queries
+# pricing.responseUsd    = what CTX charges per call (you keep 90%)
 
-# ── Load semantic model once at startup ───────────────────────────────────────
-
-_semantic_model = None
-_semantic_available = False
-
-def _load_semantic_model():
-    """
-    Load fastembed model at startup. fastembed is PyTorch-free (~50MB),
-    installs fast on Railway, and produces high-quality embeddings via ONNX.
-    Model: BAAI/bge-small-en-v1.5 — 384 dimensions, same as MiniLM.
-    Falls back silently to fuzzy-only if not installed.
-    """
-    global _semantic_model, _semantic_available
-    try:
-        from fastembed import TextEmbedding
-        _semantic_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
-        # Warm up the model with a dummy encode so first real request is fast
-        list(_semantic_model.embed(["warmup"]))
-        _semantic_available = True
-        logger.info("Semantic matcher loaded: BAAI/bge-small-en-v1.5 (fastembed)")
-    except Exception as e:
-        logger.warning(f"Semantic matcher unavailable (falling back to fuzzy-only): {e}")
-        _semantic_available = False
-
-# Load on import — happens once when Railway boots the server
-_load_semantic_model()
-
-
-def _cosine_similarity(vec_a, vec_b) -> float:
-    """Compute cosine similarity between two numpy vectors."""
-    import numpy as np
-    dot   = np.dot(vec_a, vec_b)
-    norm  = np.linalg.norm(vec_a) * np.linalg.norm(vec_b)
-    return float(dot / norm) if norm > 0 else 0.0
-
-
-def semantic_similarity(query: str, result_title: str) -> float | None:
-    """
-    Returns cosine similarity [0.0–1.0] between query and result title.
-    Returns None if semantic model is not available (caller should skip check).
-    fastembed.embed() returns a generator — convert to list to materialise.
-    """
-    if not _semantic_available or _semantic_model is None:
-        return None
-    try:
-        import numpy as np
-        embeddings = list(_semantic_model.embed([query, result_title]))
-        vec_a = np.array(embeddings[0])
-        vec_b = np.array(embeddings[1])
-        return _cosine_similarity(vec_a, vec_b)
-    except Exception as e:
-        logger.warning(f"Semantic similarity failed: {e}")
-        return None
-
-
-# ── Existing matching infrastructure ──────────────────────────────────────────
-
-VARIANT_PATTERNS = {
-    "storage": r"(\d+\s*(?:gb|tb))",
-    "color":   r"\b(black|white|silver|gold|blue|red|pink|graphite|midnight|starlight|purple|green|yellow|coral)\b",
-    "size":    r"(\d+\.?\d*\s*(?:inch|inches|\"|ft|oz|fl oz|lb|liter|ml|mm|cm))",
-    "year":    r"\b(20\d{2})\b",
-    "gen":     r"\b(\d+(?:st|nd|rd|th)\s*gen(?:eration)?)\b",
+CTX_META_FULL = {
+    "ctx": {
+        "surface": "query",
+        "queryEligible": True,
+        "pricing": {"responseUsd": 0.10}
+    }
 }
 
-STOPWORDS = {
-    "wireless", "headphones", "earbuds", "earphones", "speaker", "speakers",
-    "black", "white", "silver", "gold", "bundle", "new", "sealed", "refurbished",
-    "renewed", "the", "with", "for", "and", "in", "a", "an", "of",
-    "latest", "model", "version", "edition", "pack", "set",
+CTX_META_LIGHT = {
+    "ctx": {
+        "surface": "query",
+        "queryEligible": True,
+        "pricing": {"responseUsd": 0.05}
+    }
 }
 
-ACCESSORY_KEYWORDS = [
-    "case", "cover", "screen protector", "tempered glass", "charger",
-    "cable", "stand", "skin", "sleeve", "pouch", "holder", "mount",
-    "adapter", "dock", "stylus", "protector", "bumper", "shell",
-    "wallet", "folio", "kickstand", "magsafe", "band", "strap",
-    "film", "wrap", "decal", "sticker", "clip", "hook", "grip",
-]
+# ── Schema-compliant error responses ──────────────────────────────────────────
+# Every tool must return all required fields from its outputSchema even on error.
+
+def _error_response(tool_name: str, message: str) -> dict:
+    """Returns a schema-compliant error dict for any tool."""
+    base = {
+        "error":   message,
+        "verdict": f"An error occurred: {message}",
+        "_meta":   CTX_META_LIGHT,
+    }
+    # Add required fields per tool so outputSchema validation always passes
+    if tool_name == "compare_prices":
+        base.update({
+            "product_name":      "Unknown",
+            "match_confidence":  "LOW",
+            "deal_score":        0,
+            "disclaimer":        "Could not retrieve data. Please try again.",
+        })
+    elif tool_name == "get_price_history":
+        base.update({
+            "product":     "Unknown",
+            "data_points": 0,
+            "history":     [],
+            "message":     f"Error: {message}",
+        })
+    elif tool_name == "get_deal_score":
+        base.update({
+            "product":       "Unknown",
+            "current_price": 0,
+            "deal_score":    0,
+        })
+    elif tool_name == "check_availability":
+        base.update({
+            "product_name": "Unknown",
+            "summary":      f"Error: {message}",
+        })
+    return base
 
 
-class ProductMatcher:
-    """Resolves a user query into a canonical product identity and scores retailer results."""
 
-    async def resolve(self, query: str) -> dict:
-        """
-        Returns: { title, upc, brand, model }
-        """
-        query = query.strip()
 
-        if re.fullmatch(r"\d{8}|\d{12}|\d{13}", query):
-            result = await self._upc_lookup(query)
-            if result:
-                return result
+# ── Tool definitions ──────────────────────────────────────────────────────────
 
-        model = self._extract_model(query)
-        if model:
-            return {
-                "title": query,
-                "upc":   None,
-                "brand": self._extract_brand(query),
-                "model": model,
-            }
+@server.list_tools()
+async def list_tools() -> list[types.Tool]:
+    return [
 
-        return {
-            "title": query,
-            "upc":   None,
-            "brand": self._extract_brand(query),
-            "model": self._extract_model(query),
-        }
+        # Tool 1: Full price comparison (flagship)
+        types.Tool(
+            name="compare_prices",
+            description=(
+                "Compare real-time product prices across Amazon, Walmart, and Target. "
+                "Returns current prices from all three retailers, identifies the cheapest option, "
+                "calculates a deal score from 0 to 10 based on historical price data, "
+                "and gives a plain-English buy-now-or-wait recommendation. "
+                "Use this when a user wants to know where to buy a product for the best price today, "
+                "or whether the current price is a good deal. "
+                "Replaces Keepa Pro and Jungle Scout for cross-retailer deal detection. "
+                "Accepts a product name like 'Sony WH-1000XM5', a model number, or a UPC barcode."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "product": {
+                        "type": "string",
+                        "description": (
+                            "The product to search for. Can be a product name "
+                            "('Sony WH-1000XM5'), model number ('RTX 4090'), "
+                            "or UPC barcode ('043396630833')."
+                        ),
+                    },
+                    "zip_code": {
+                        "type": "string",
+                        "description": "US ZIP code for localised pricing. Defaults to 10001 (New York).",
+                        "default": "10001",
+                    },
+                },
+                "required": ["product"],
+            },
+            outputSchema={
+                "type": "object",
+                "properties": {
+                    "product_name":      {"type": "string"},
+                    "match_confidence":  {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+                    "retailers_found":   {"type": "integer", "description": "Number of retailers (0-3) that returned a valid price. Use this to know if data is complete."},
+                    "amazon":            {"type": ["object", "null"], "description": "Amazon price result. Contains price, in_stock, url, title, confidence, condition ('new'|'renewed'|'used'). Null if no matching product found."},
+                    "walmart":           {"type": ["object", "null"], "description": "Walmart price result. Contains price, in_stock, url, title, confidence, condition ('new'|'renewed'|'used'). Null if no matching product found."},
+                    "target":            {"type": ["object", "null"], "description": "Target price result. Contains price, in_stock, url, title, confidence, condition ('new'|'renewed'|'used'). Null if no matching product found."},
+                    "cheapest_retailer": {"type": "string", "description": "Name of cheapest retailer. Empty string if no prices found."},
+                    "cheapest_price":    {"type": "number", "description": "Cheapest price found. 0 if no prices found."},
+                    "price_spread_pct":  {"type": "number", "description": "Percentage difference between highest and lowest price. 0 when fewer than 2 retailers returned prices."},
+                    "deal_score":        {"type": "integer", "minimum": 0, "maximum": 10},
+                    "verdict":           {"type": "string"},
+                    "price_context":     {"type": "string", "description": "Condition warning and market trend note, e.g. if cheapest result is refurbished or prices are at a historic low. Empty string if no context to add."},
+                    "disclaimer":        {"type": "string"},
+                },
+                "required": ["product_name", "match_confidence", "deal_score", "verdict", "price_context", "disclaimer"],
+            },
+        ),
 
-    async def _upc_lookup(self, upc: str) -> dict | None:
-        try:
-            async with httpx.AsyncClient(timeout=8) as client:
-                r = await client.get(UPC_API_BASE, params={"upc": upc})
-                data = r.json()
-                items = data.get("items", [])
-                if items:
-                    item = items[0]
-                    return {
-                        "title": item.get("title", ""),
-                        "upc":   upc,
-                        "brand": item.get("brand", ""),
-                        "model": item.get("model", ""),
-                    }
-        except Exception:
-            pass
-        return None
+        # Tool 2: Price history
+        types.Tool(
+            name="get_price_history",
+            description=(
+                "Retrieve the observed price history for a product from the local cache. "
+                "Returns all previously recorded prices across Amazon, Walmart, and Target, "
+                "including the all-time observed low price and how many data points have been collected. "
+                "Use this when a user wants to understand how a product's price has changed over time, "
+                "or to verify whether a current price is genuinely a good deal historically. "
+                "Note: history only exists for products previously queried via compare_prices."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "product": {
+                        "type": "string",
+                        "description": "Product name to look up history for.",
+                    },
+                },
+                "required": ["product"],
+            },
+            outputSchema={
+                "type": "object",
+                "properties": {
+                    "product":      {"type": "string"},
+                    "observed_low": {"type": ["number", "null"]},
+                    "data_points":  {"type": "integer"},
+                    "history":      {"type": "array"},
+                    "message":      {"type": "string"},
+                },
+                "required": ["product", "data_points", "history", "message"],
+            },
+        ),
 
-    async def _upc_search(self, query: str) -> dict | None:
-        try:
-            async with httpx.AsyncClient(timeout=8) as client:
-                r = await client.get(
-                    "https://api.upcitemdb.com/prod/trial/search",
-                    params={"s": query, "type": "product"},
-                )
-                data = r.json()
-                items = data.get("items", [])
-                if items:
-                    item = items[0]
-                    upcs = item.get("upc", [])
-                    return {
-                        "title": item.get("title", query),
-                        "upc":   upcs[0] if upcs else None,
-                        "brand": item.get("brand", ""),
-                        "model": item.get("model", ""),
-                    }
-        except Exception:
-            pass
-        return None
+        # Tool 3: Deal score only (lightweight)
+        types.Tool(
+            name="get_deal_score",
+            description=(
+                "Get a quick deal score from 0 to 10 for a product at a given price. "
+                "Use this when you already know the current price and just want to know "
+                "if it is a good deal compared to historical prices observed by this tool. "
+                "Faster and cheaper than compare_prices. "
+                "Use it for follow-up questions like 'is $279 a good price for Sony WH-1000XM5?' "
+                "Returns the score, the observed historical low, and a short verdict."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "product": {
+                        "type": "string",
+                        "description": "Product name to score.",
+                    },
+                    "current_price": {
+                        "type": "number",
+                        "description": "The price to evaluate, e.g. 279.99",
+                    },
+                },
+                "required": ["product", "current_price"],
+            },
+            outputSchema={
+                "type": "object",
+                "properties": {
+                    "product":       {"type": "string"},
+                    "current_price": {"type": "number"},
+                    "deal_score":    {"type": "integer", "minimum": 0, "maximum": 10},
+                    "observed_low":  {"type": ["number", "null"]},
+                    "verdict":       {"type": "string"},
+                },
+                "required": ["product", "current_price", "deal_score", "verdict"],
+            },
+        ),
 
-    def _extract_brand(self, text: str) -> str:
-        words = text.split()
-        for w in words:
-            if w and w[0].isupper() and len(w) > 1:
-                return w
-        return ""
+        # Tool 4: Availability check
+        types.Tool(
+            name="check_availability",
+            description=(
+                "Check whether a product is currently in stock at Amazon, Walmart, and Target. "
+                "Use this when a user wants to know if a product is available to buy right now "
+                "without needing full price comparison data. "
+                "Returns in-stock status and a direct product URL for each retailer. "
+                "Faster than compare_prices when the user only cares about stock status, "
+                "for example: 'Is the PS5 in stock anywhere right now?'"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "product": {
+                        "type": "string",
+                        "description": "Product name, model number, or UPC to check availability for.",
+                    },
+                    "zip_code": {
+                        "type": "string",
+                        "description": "US ZIP code. Defaults to 10001.",
+                        "default": "10001",
+                    },
+                },
+                "required": ["product"],
+            },
+            outputSchema={
+                "type": "object",
+                "properties": {
+                    "product_name": {"type": "string"},
+                    "amazon":       {"type": "object"},
+                    "walmart":      {"type": "object"},
+                    "target":       {"type": "object"},
+                    "summary":      {"type": "string"},
+                },
+                "required": ["product_name", "summary"],
+            },
+        ),
+    ]
 
-    def _extract_model(self, text: str) -> str:
-        pattern = r"\b[A-Z]{1,5}[-_]?\d{2,6}[A-Z0-9\-]*\b"
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        return matches[0] if matches else ""
 
-    # ── Retailer result scoring ──────────────────────────────────────────────
+# ── Tool dispatcher ────────────────────────────────────────────────────────────
 
-    def score_retailer_result(
-        self,
-        raw: Any,
-        canonical_title: str,
-        brand: str | None,
-        requested_size: str | None = None,
-    ) -> dict:
-        """
-        Takes a raw retailer fetch result and returns a normalised dict
-        with confidence score attached.
-
-        Scoring pipeline:
-          1. Error / empty check
-          2. Accessory mismatch filter (keyword-based, fast)
-          3. Semantic similarity check (NLP — rejects category mismatches)
-          4. Fuzzy score (catches typos / word order)
-          5. Variant mismatch penalty
-          6. Confidence assignment
-        """
-        if isinstance(raw, Exception) or raw is None:
-            return self._not_found(note=str(raw) if isinstance(raw, Exception) else "No result")
-
-        if not isinstance(raw, dict):
-            return self._not_found(note="Unexpected response format")
-
-        if raw.get("error"):
-            return self._not_found(note=raw["error"])
-
-        retailer_title = raw.get("title", "")
-        if not retailer_title:
-            return self._not_found(note="No title in response")
-
-        # ── Step 1: Accessory mismatch (fast keyword check) ───────────────
-        accessory_flag = self._is_accessory_mismatch(canonical_title, retailer_title)
-        if accessory_flag:
-            return self._not_found(
-                note=(
-                    f"Result appears to be an accessory, not the product itself: "
-                    f"'{retailer_title[:80]}'"
-                )
-            )
-
-        # ── Step 2: Semantic similarity (NLP category mismatch check) ─────
-        # This is the main fix for "AirPods returned for Jordan shoe query".
-        # The semantic model understands that shoes and earbuds are different
-        # categories even when they share words like "Air".
-        sem_score = semantic_similarity(canonical_title, retailer_title)
-        if sem_score is not None and sem_score < SEMANTIC_REJECT_THRESHOLD:
-            return self._not_found(
-                note=(
-                    f"Result rejected: semantic similarity {sem_score:.2f} below threshold "
-                    f"{SEMANTIC_REJECT_THRESHOLD} (category mismatch). "
-                    f"Query: '{canonical_title[:50]}' — Got: '{retailer_title[:60]}'"
-                )
-            )
-
-        # ── Step 3: Fuzzy score (typos, word order, partial matches) ──────
-        fuzzy_score = self._fuzzy_score(canonical_title, retailer_title)
-
-        if fuzzy_score < MINIMUM_FUZZY_SCORE:
-            return self._not_found(
-                note=f"Result rejected: fuzzy score {fuzzy_score:.0f} below minimum threshold. Got: '{retailer_title[:60]}'"
-            )
-
-        # ── Step 4a: Size match check ──────────────────────────────────────
-        # Initialised here so they're always in scope regardless of whether
-        # requested_size was provided (fixes "name 'size_note' is not defined").
-        size_match = None   # None = no size was requested
-        size_note  = ""
-        if requested_size:
-            size_match = self._check_size_match(requested_size, retailer_title)
-            if size_match is False:
-                size_note = (
-                    f"⚠️ Size mismatch: requested {requested_size}, "
-                    f"result title does not confirm this size."
-                )
-
-        # ── Step 4b: Variant mismatch penalty ─────────────────────────────
-        user_variants     = self._extract_variants(canonical_title)
-        retailer_variants = self._extract_variants(retailer_title)
-        variant_warning   = self._variant_mismatch(user_variants, retailer_variants)
-
-        # ── Step 5: Confidence assignment ─────────────────────────────────
-        if fuzzy_score >= FUZZY_HIGH_THRESHOLD and not variant_warning:
-            confidence = "HIGH"
-        elif fuzzy_score >= FUZZY_MEDIUM_THRESHOLD:
-            confidence = "MEDIUM"
+@server.call_tool()
+async def call_tool(name: str, arguments: dict[str, Any]):
+    try:
+        if name == "compare_prices":
+            result = await handle_compare_prices(arguments)
+            meta   = CTX_META_FULL
+        elif name == "get_price_history":
+            result = await handle_price_history(arguments)
+            meta   = CTX_META_LIGHT
+        elif name == "get_deal_score":
+            result = await handle_deal_score(arguments)
+            meta   = CTX_META_LIGHT
+        elif name == "check_availability":
+            result = await handle_availability(arguments)
+            meta   = CTX_META_LIGHT
         else:
-            confidence = "LOW"
+            raise ValueError(f"Unknown tool: {name}")
 
-        note = variant_warning or size_note or ""
-
-        return {
-            "price":          raw.get("price"),
-            "currency":       raw.get("currency", "USD"),
-            "in_stock":       raw.get("in_stock"),
-            "url":            raw.get("url"),
-            "title":          retailer_title,
-            "confidence":     confidence,
-            "fuzzy_score":    fuzzy_score,
-            "semantic_score": round(sem_score, 3) if sem_score is not None else None,
-            "size_match":     size_match,
-            "note":           note,
-            # Pass through coupon fields from raw retailer data
-            "coupon_available": raw.get("coupon_available", False),
-            "coupon_text":      raw.get("coupon_text", ""),
-            "coupon_discount":  raw.get("coupon_discount"),
-            "effective_price":  raw.get("effective_price") or raw.get("price"),
-        }
-
-    def _fuzzy_score(self, a: str, b: str) -> float:
-        a_norm = self._normalise(a)
-        b_norm = self._normalise(b)
-        return fuzz.token_sort_ratio(a_norm, b_norm)
-
-    def _normalise(self, text: str) -> str:
-        text = text.lower()
-        text = re.sub(r"[^a-z0-9\s]", " ", text)
-        tokens = [t for t in text.split() if t not in STOPWORDS and len(t) > 1]
-        return " ".join(sorted(tokens))
-
-    def _extract_variants(self, text: str) -> dict:
-        variants = {}
-        for key, pattern in VARIANT_PATTERNS.items():
-            m = re.search(pattern, text.lower())
-            if m:
-                variants[key] = m.group(1).strip()
-        return variants
-
-    def _variant_mismatch(self, user: dict, retailer: dict) -> str | None:
-        mismatches = []
-        for key in ("storage", "size", "year", "gen"):
-            u = user.get(key)
-            r = retailer.get(key)
-            if u and r and u.lower() != r.lower():
-                mismatches.append(f"{key}: query={u}, result={r}")
-        if mismatches:
-            return "⚠️ Possible variant mismatch — " + "; ".join(mismatches)
-        return None
-
-    def _is_accessory_mismatch(self, query: str, retailer_title: str) -> bool:
-        """
-        Returns True ONLY if the result is clearly an accessory FOR the queried
-        product — shares query words but adds an accessory keyword.
-        Does NOT flag completely unrelated products (that's the semantic layer's job).
-        """
-        query_lower = query.lower()
-        title_lower = retailer_title.lower()
-
-        stopwords   = {"the", "for", "and", "with", "gen", "new"}
-        query_words = [w for w in re.findall(r"[a-z0-9]+", query_lower)
-                       if len(w) >= 3 and w not in stopwords]
-
-        title_contains_query_words = any(w in title_lower for w in query_words)
-        if not title_contains_query_words:
-            return False
-
-        for keyword in ACCESSORY_KEYWORDS:
-            if keyword in title_lower and keyword not in query_lower:
-                return True
-        return False
-
-    def _check_size_match(self, requested_size: str, title: str) -> bool | None:
-        """
-        Check if the retailer result title confirms the requested size.
-        Normalises US shoe/clothing sizes, numeric sizes, and EU sizes.
-        Returns True if confirmed, False if different size found, None if no size info in title.
-        """
-        def normalise_size(s: str) -> str:
-            s = s.lower().strip()
-            s = re.sub(r"(us|eu|uk|size|sz|women|men|womens|mens|'s)", "", s)
-            s = re.sub(r"[^0-9.]", "", s).strip()
-            # Normalise "11.0" → "11", "9.5" stays "9.5"
-            try:
-                f = float(s)
-                return str(int(f)) if f == int(f) else str(f)
-            except (ValueError, OverflowError):
-                return s
-
-        req_norm  = normalise_size(requested_size)
-        title_low = title.lower()
-
-        # Find all size-like patterns in title: "size 11", "11.0", "US 10.5", etc.
-        size_patterns = re.findall(
-            r"(?:size|sz|us|uk|eu)?\s*(\d{1,2}(?:\.\d)?)",
-            title_low
+        result["_meta"] = meta
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=json.dumps(result, indent=2))],
+            structuredContent=result,
         )
 
-        if not size_patterns:
-            return None  # title has no size info — can't confirm or deny
+    except Exception as e:
+        error_result = _error_response(name, str(e))
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=json.dumps(error_result, indent=2))],
+            structuredContent=error_result,
+            isError=True,
+        )
 
-        title_sizes = {normalise_size(s) for s in size_patterns if normalise_size(s)}
-        return req_norm in title_sizes
 
-    def _not_found(self, note: str = "") -> dict:
-        return {
-            "price":            None,
-            "currency":         "USD",
-            "in_stock":         False,
-            "url":              "",
-            "title":            "",
-            "confidence":       "NOT_FOUND",
-            "fuzzy_score":      0,
-            "semantic_score":   None,
-            "size_match":       None,
-            "coupon_available": False,
-            "coupon_text":      "",
-            "coupon_discount":  None,
-            "effective_price":  None,
-            "note":             note or "Product not found at this retailer",
-        }
+# ── Handlers ───────────────────────────────────────────────────────────────────
+
+async def handle_compare_prices(arguments: dict) -> dict:
+    product_query = arguments.get("product", "").strip()
+    zip_code      = arguments.get("zip_code", "10001")
+    if not product_query:
+        return _error_response("compare_prices", "product parameter is required")
+
+    resolved       = await matcher.resolve(product_query)
+    canonical_name = resolved.get("title", product_query)
+    upc            = resolved.get("upc")
+    brand          = resolved.get("brand")
+    search_term    = resolved.get("model") or canonical_name
+
+    amazon_raw, walmart_raw, target_raw = await asyncio.gather(
+        fetch_amazon(search_term, upc, zip_code),
+        fetch_walmart(search_term, upc, zip_code),
+        fetch_target(search_term, upc, zip_code),
+        return_exceptions=True,
+    )
+
+    amazon  = matcher.score_retailer_result(amazon_raw,  canonical_name, brand)
+    walmart = matcher.score_retailer_result(walmart_raw, canonical_name, brand)
+    target  = matcher.score_retailer_result(target_raw,  canonical_name, brand)
+
+    retailer_map = {"amazon": amazon, "walmart": walmart, "target": target}
+
+    valid_prices = {
+        k: v["price"]
+        for k, v in retailer_map.items()
+        if isinstance(v.get("price"), (int, float)) and v.get("confidence") in ("HIGH", "MEDIUM")
+    }
+
+    # Also track any found prices regardless of confidence (for condition context + fallback cheapest)
+    all_found_prices = {
+        k: v["price"]
+        for k, v in retailer_map.items()
+        if isinstance(v.get("price"), (int, float)) and v.get("confidence") != "NOT_FOUND"
+    }
+
+    cache.update(canonical_name, valid_prices)
+    rolling_min = cache.get_rolling_min(canonical_name)
+    deal_score  = scorer.compute_deal_score(valid_prices, rolling_min)
+
+    cheapest_retailer = cheapest_price = price_spread_pct = None
+    if valid_prices:
+        cheapest_retailer = min(valid_prices, key=valid_prices.get)
+        cheapest_price    = valid_prices[cheapest_retailer]
+        if len(valid_prices) > 1:
+            max_p = max(valid_prices.values())
+            min_p = min(valid_prices.values())
+            if max_p > 0:
+                price_spread_pct = round((max_p - min_p) / max_p * 100, 1)
+    elif all_found_prices:
+        # Fall back to LOW confidence so cheapest_retailer is never blank
+        cheapest_retailer = min(all_found_prices, key=all_found_prices.get)
+        cheapest_price    = all_found_prices[cheapest_retailer]
+
+    verdict = scorer.generate_verdict(
+        valid_prices=valid_prices or all_found_prices,
+        cheapest_retailer=cheapest_retailer,
+        cheapest_price=cheapest_price,
+        price_spread_pct=price_spread_pct,
+        deal_score=deal_score,
+        rolling_min=rolling_min,
+    )
+
+    # Condition warning + market trend context sentence
+    price_context = scorer.generate_price_context(
+        valid_prices=all_found_prices,
+        retailer_results=retailer_map,
+        rolling_min=rolling_min,
+        cheapest_price=cheapest_price,
+    )
+
+    confidences = [amazon["confidence"], walmart["confidence"], target["confidence"]]
+    if confidences.count("HIGH") >= 2:
+        overall = "HIGH"
+    elif "HIGH" in confidences or confidences.count("MEDIUM") >= 2:
+        overall = "MEDIUM"
+    else:
+        overall = "LOW"
+
+    retailers_found = sum(1 for r in [amazon, walmart, target] if r.get("price") is not None)
+
+    def retailer_or_null(r):
+        if r.get("confidence") == "NOT_FOUND":
+            return None
+        result = dict(r)
+        result.setdefault("condition", "new")
+        return result
+
+    return {
+        "product_name":      canonical_name,
+        "match_confidence":  overall,
+        "retailers_found":   retailers_found,
+        "amazon":            retailer_or_null(amazon),
+        "walmart":           retailer_or_null(walmart),
+        "target":            retailer_or_null(target),
+        "cheapest_retailer": cheapest_retailer or "",
+        "cheapest_price":    cheapest_price or 0,
+        "price_spread_pct":  price_spread_pct or 0,
+        "deal_score":        deal_score,
+        "verdict":           verdict,
+        "price_context":     price_context,
+        "disclaimer": (
+            "Prices queried from a fixed US location. "
+            "Final prices may vary by region, membership status (Walmart+, Target Circle), "
+            "and real-time availability. Verify before purchasing."
+        ),
+    }
+
+
+
+async def handle_price_history(arguments: dict) -> dict:
+    product = arguments.get("product", "").strip()
+    if not product:
+        return _error_response("get_price_history", "product parameter is required")
+
+    history     = cache.get_history(product)
+    rolling_min = cache.get_rolling_min(product)
+
+    if not history:
+        message = (
+            f"No price history found for '{product}'. "
+            "Run compare_prices for this product first to start building history."
+        )
+    else:
+        message = (
+            f"Found {len(history)} price observations for '{product}'. "
+            f"Observed low: ${rolling_min:,.2f}."
+        )
+
+    return {
+        "product":      product,
+        "observed_low": rolling_min,
+        "data_points":  len(history),
+        "history":      history[-50:],
+        "message":      message,
+    }
+
+
+async def handle_deal_score(arguments: dict) -> dict:
+    product       = arguments.get("product", "").strip()
+    current_price = arguments.get("current_price")
+    if not product or current_price is None:
+        return _error_response("get_deal_score", "product and current_price are required")
+
+    rolling_min = cache.get_rolling_min(product)
+    deal_score  = scorer.compute_deal_score({"provided": current_price}, rolling_min)
+    verdict     = scorer.generate_verdict(
+        valid_prices={"checked price": current_price},
+        cheapest_retailer="checked price",
+        cheapest_price=current_price,
+        price_spread_pct=None,
+        deal_score=deal_score,
+        rolling_min=rolling_min,
+    )
+    return {
+        "product":       product,
+        "current_price": current_price,
+        "deal_score":    deal_score,
+        "observed_low":  rolling_min,
+        "verdict":       verdict,
+    }
+
+
+async def handle_availability(arguments: dict) -> dict:
+    product_query = arguments.get("product", "").strip()
+    zip_code      = arguments.get("zip_code", "10001")
+    if not product_query:
+        return _error_response("compare_prices", "product parameter is required")
+
+    resolved       = await matcher.resolve(product_query)
+    canonical_name = resolved.get("title", product_query)
+    upc            = resolved.get("upc")
+    brand          = resolved.get("brand")
+    search_term    = resolved.get("model") or canonical_name
+
+    amazon_raw, walmart_raw, target_raw = await asyncio.gather(
+        fetch_amazon(search_term, upc, zip_code),
+        fetch_walmart(search_term, upc, zip_code),
+        fetch_target(search_term, upc, zip_code),
+        return_exceptions=True,
+    )
+
+    amazon  = matcher.score_retailer_result(amazon_raw,  canonical_name, brand)
+    walmart = matcher.score_retailer_result(walmart_raw, canonical_name, brand)
+    target  = matcher.score_retailer_result(target_raw,  canonical_name, brand)
+
+    def avail_label(name, r):
+        if r["confidence"] == "NOT_FOUND": return f"{name}: Not found"
+        s = r.get("in_stock")
+        if s is True:  return f"{name}: ✅ In Stock"
+        if s is False: return f"{name}: ❌ Out of Stock"
+        return f"{name}: ⚠️ Unknown"
+
+    in_stock_count = sum(
+        1 for r in [amazon, walmart, target]
+        if r.get("in_stock") is True and r["confidence"] != "NOT_FOUND"
+    )
+    note = (
+        "Available at all three retailers." if in_stock_count == 3
+        else "Not confirmed in stock at any retailer." if in_stock_count == 0
+        else f"In stock at {in_stock_count} of 3 retailers."
+    )
+
+    return {
+        "product_name": canonical_name,
+        "amazon":  {"in_stock": amazon.get("in_stock"),  "url": amazon.get("url"),  "confidence": amazon["confidence"]},
+        "walmart": {"in_stock": walmart.get("in_stock"), "url": walmart.get("url"), "confidence": walmart["confidence"]},
+        "target":  {"in_stock": target.get("in_stock"),  "url": target.get("url"),  "confidence": target["confidence"]},
+        "summary": " | ".join([
+            avail_label("Amazon", amazon),
+            avail_label("Walmart", walmart),
+            avail_label("Target", target),
+        ]) + f" — {note}",
+    }
+
+
+# ── Run ────────────────────────────────────────────────────────────────────────
+
+async def run():
+    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+        await server.run(
+            read_stream,
+            write_stream,
+            InitializationOptions(
+                server_name="price-intelligence-feed",
+                server_version="1.0.0",
+                capabilities=server.get_capabilities(
+                    notification_options=NotificationOptions(),
+                    experimental_capabilities={},
+                ),
+            ),
+        )
+
+if __name__ == "__main__":
+    asyncio.run(run())
