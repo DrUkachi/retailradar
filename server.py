@@ -325,22 +325,28 @@ async def handle_compare_prices(arguments: dict) -> dict:
 
     retailer_map = {"amazon": amazon, "walmart": walmart, "target": target}
 
+    # valid_prices: all retailers with a real price (any confidence except NOT_FOUND).
+    # Used for cheapest_retailer, deal scoring, spread, and verdict.
     valid_prices = {
-        k: v["price"]
+        k: _eff(v)
         for k, v in retailer_map.items()
-        if isinstance(v.get("price"), (int, float)) and v.get("confidence") in ("HIGH", "MEDIUM")
+        if isinstance(_eff(v), (int, float)) and v.get("confidence") != "NOT_FOUND"
     }
 
-    # Also track any found prices regardless of confidence (for condition context + fallback cheapest)
-    all_found_prices = {
-        k: v["price"]
+    # cache_prices: only HIGH/MEDIUM confidence results go into price history.
+    # LOW confidence results may be wrong products — don't let them set historical lows.
+    cache_prices = {
+        k: _eff(v)
         for k, v in retailer_map.items()
-        if isinstance(v.get("price"), (int, float)) and v.get("confidence") != "NOT_FOUND"
+        if isinstance(_eff(v), (int, float)) and v.get("confidence") in ("HIGH", "MEDIUM")
     }
 
-    cache.update(canonical_name, valid_prices)
+    all_found_prices = valid_prices  # alias for price_context generator
+
+    cache.update(canonical_name, cache_prices)
     rolling_min = cache.get_rolling_min(canonical_name)
-    deal_score  = scorer.compute_deal_score(valid_prices, rolling_min)
+    data_points = len(cache.get_history(canonical_name))
+    deal_score  = scorer.compute_deal_score(valid_prices, rolling_min, data_points)
 
     cheapest_retailer = cheapest_price = price_spread_pct = None
     if valid_prices:
@@ -363,6 +369,7 @@ async def handle_compare_prices(arguments: dict) -> dict:
         price_spread_pct=price_spread_pct,
         deal_score=deal_score,
         rolling_min=rolling_min,
+        data_points=data_points,
     )
 
     # Condition warning + market trend context sentence
