@@ -7,11 +7,18 @@ from typing import Optional
 
 
 class DealScorer:
+    """
+    Deal score logic:
+      - Base: how many retailers have this product (coverage score)
+      - Price signal: how far current cheapest price is from rolling minimum
+      - Spread bonus: larger spread = more value in finding the cheapest
+    """
 
     def compute_deal_score(
         self,
-        valid_prices: dict,
+        valid_prices: dict[str, float],
         rolling_min: Optional[float],
+        data_points: int = 0,
     ) -> int:
         if not valid_prices:
             return 0
@@ -19,25 +26,31 @@ class DealScorer:
         cheapest = min(valid_prices.values())
         score = 0
 
-        score += min(len(valid_prices), 3)  # coverage: max 3 pts
+        # Coverage: up to 3 points for how many retailers have the product
+        score += min(len(valid_prices), 3)
 
-        if rolling_min and rolling_min > 0:
+        # Price vs rolling minimum (up to 5 points)
+        # Only trust the historical signal when we have enough data points.
+        # With 1-2 observations the "observed low" IS the current price — misleading.
+        if rolling_min and rolling_min > 0 and data_points >= 3:
             pct_above_min = (cheapest - rolling_min) / rolling_min * 100
             if pct_above_min <= 2:
-                score += 5
+                score += 5   # at or near all-time observed low
             elif pct_above_min <= 8:
-                score += 4
+                score += 4   # very close to low
             elif pct_above_min <= 15:
-                score += 3
+                score += 3   # reasonably close
             elif pct_above_min <= 25:
-                score += 2
+                score += 2   # somewhat elevated
             elif pct_above_min <= 40:
-                score += 1
+                score += 1   # elevated
             else:
-                score += 0
+                score += 0   # well above historical low
         else:
-            score += 2  # no history — neutral
+            # Thin or no history — neutral signal, don't reward or penalise
+            score += 2
 
+        # Spread bonus: finding cheapest is more valuable when spread is high
         if len(valid_prices) >= 2:
             max_price = max(valid_prices.values())
             if max_price > 0:
@@ -51,13 +64,16 @@ class DealScorer:
 
     def generate_verdict(
         self,
-        valid_prices: dict,
+        valid_prices: dict[str, float],
         cheapest_retailer: Optional[str],
         cheapest_price: Optional[float],
         price_spread_pct: Optional[float],
         deal_score: int,
         rolling_min: Optional[float],
+        data_points: int = 0,
     ) -> str:
+        """Generate a plain-English buy/wait recommendation."""
+
         if not valid_prices or cheapest_retailer is None:
             return (
                 "Could not retrieve reliable pricing data across retailers. "
@@ -67,6 +83,7 @@ class DealScorer:
         parts = []
         retailer_cap = cheapest_retailer.capitalize()
 
+        # Part 1: Cheapest retailer finding
         if len(valid_prices) == 1:
             parts.append(
                 f"{retailer_cap} is the only retailer with a confirmed price match "
@@ -75,6 +92,7 @@ class DealScorer:
         else:
             parts.append(f"{retailer_cap} is cheapest at ${cheapest_price:,.2f}.")
 
+        # Part 2: Spread context
         if price_spread_pct and price_spread_pct >= 5:
             max_retailer = max(valid_prices, key=valid_prices.get)
             max_price    = valid_prices[max_retailer]
@@ -83,17 +101,19 @@ class DealScorer:
                 f"(${max_price:,.2f})."
             )
 
-        if rolling_min and cheapest_price:
+        # Part 3: Historical context
+        if rolling_min and cheapest_price and data_points >= 3:
+            # Enough history to make a meaningful comparison
             pct_above = (cheapest_price - rolling_min) / rolling_min * 100
             if pct_above <= 2:
                 parts.append(
-                    f"The current price is at or near the lowest we have observed "
-                    f"(observed low: ${rolling_min:,.2f}). This is a strong buying signal."
+                    f"The current price matches the lowest we've ever observed "
+                    f"across {data_points} price checks (low: ${rolling_min:,.2f}). Strong buying signal."
                 )
             elif pct_above <= 10:
                 parts.append(
                     f"Price is close to the observed low of ${rolling_min:,.2f} "
-                    f"({pct_above:.1f}% above). Good value."
+                    f"({pct_above:.1f}% above) across {data_points} observations. Good value."
                 )
             elif pct_above <= 25:
                 parts.append(
@@ -103,14 +123,22 @@ class DealScorer:
             else:
                 parts.append(
                     f"Price is {pct_above:.1f}% above the observed low of ${rolling_min:,.2f}. "
-                    f"Historically, better prices have been available."
+                    f"Historically, better prices have been available — consider waiting."
                 )
+        elif rolling_min and cheapest_price and data_points > 0:
+            # 1-2 observations — too thin to draw real conclusions
+            parts.append(
+                f"🆕 Limited history ({data_points} observation{'s' if data_points > 1 else ''}) — "
+                f"not enough data to confirm whether this is a good price yet. "
+                f"Price score will improve as more observations are collected."
+            )
         else:
             parts.append(
-                "No historical price data available yet for this product "
-                "(deal score improves over time as price history builds)."
+                "🆕 First time we've tracked this product — no historical data to compare against yet. "
+                "Check back after a few queries to get a more accurate deal score."
             )
 
+        # Part 4: Deal score summary
         if deal_score >= 8:
             recommendation = "✅ Buy now — this is a strong deal."
         elif deal_score >= 6:
@@ -130,20 +158,20 @@ class DealScorer:
         self,
         valid_prices: dict,
         retailer_results: dict,
-        rolling_min: Optional[float],
-        cheapest_price: Optional[float],
+        rolling_min: float | None,
+        cheapest_price: float | None,
     ) -> str:
         """
-        Returns a one-sentence market context note when it adds real value:
-        - Flags when the cheapest result is refurbished vs new prices elsewhere
-        - Notes when prices are at or well above the historical low
-        Empty string if nothing notable to add.
+        Generate a one-sentence market context note explaining WHY the price
+        is what it is — e.g. condition mix, price trend, retailer spread.
+        This is what ChatGPT provides that raw price comparisons miss.
         """
         if not valid_prices or not cheapest_price:
             return ""
 
         notes = []
 
+        # Check if any result is refurbished/renewed
         conditions = {
             retailer: result.get("condition", "new")
             for retailer, result in retailer_results.items()
@@ -166,21 +194,16 @@ class DealScorer:
                     )
             elif renewed_retailers:
                 notes.append(
-                    "Note: The listed price is for a renewed/refurbished unit — "
-                    "new units may be priced higher or unavailable at this retailer."
+                    f"Note: The listed price is for a renewed/refurbished unit — "
+                    f"new units may be priced higher or unavailable at this retailer."
                 )
 
+        # Price trend context from rolling min
         if rolling_min and cheapest_price:
             pct_above = (cheapest_price - rolling_min) / rolling_min * 100
             if pct_above <= 2:
-                notes.append(
-                    "Prices are at or near the lowest observed — "
-                    "this may reflect a recent sale or product cycle discount."
-                )
+                notes.append("Prices are at or near the lowest observed — this may reflect a recent sale or product cycle discount.")
             elif pct_above > 40:
-                notes.append(
-                    f"Prices are elevated vs the historical low of ${rolling_min:,.2f} — "
-                    "check back during major sale events (Prime Day, Black Friday)."
-                )
+                notes.append(f"Prices are elevated vs the historical low of ${rolling_min:,.2f} — check back during major sale events (Prime Day, Black Friday).")
 
         return " ".join(notes)
