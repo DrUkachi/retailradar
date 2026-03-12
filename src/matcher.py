@@ -268,7 +268,20 @@ class ProductMatcher:
                 note=f"Result rejected: fuzzy score {fuzzy_score:.0f} below minimum threshold. Got: '{retailer_title[:60]}'"
             )
 
-        # ── Step 4: Variant mismatch penalty ──────────────────────────────
+        # ── Step 4a: Size match check ──────────────────────────────────────
+        # Initialised here so they're always in scope regardless of whether
+        # requested_size was provided (fixes "name 'size_note' is not defined").
+        size_match = None   # None = no size was requested
+        size_note  = ""
+        if requested_size:
+            size_match = self._check_size_match(requested_size, retailer_title)
+            if size_match is False:
+                size_note = (
+                    f"⚠️ Size mismatch: requested {requested_size}, "
+                    f"result title does not confirm this size."
+                )
+
+        # ── Step 4b: Variant mismatch penalty ─────────────────────────────
         user_variants     = self._extract_variants(canonical_title)
         retailer_variants = self._extract_variants(retailer_title)
         variant_warning   = self._variant_mismatch(user_variants, retailer_variants)
@@ -280,7 +293,10 @@ class ProductMatcher:
             confidence = "MEDIUM"
         else:
             confidence = "LOW"
+        
 
+        size_match = None
+        size_note  = ""
         note = variant_warning or size_note or ""
 
         return {
