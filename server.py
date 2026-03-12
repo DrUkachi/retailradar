@@ -102,13 +102,16 @@ async def list_tools() -> list[types.Tool]:
             name="compare_prices",
             description=(
                 "Compare real-time product prices across Amazon, Walmart, Target, and Best Buy. "
-                "Returns current prices from all three retailers, identifies the cheapest option, "
+                "Returns current prices from all four retailers, identifies the cheapest option, "
                 "calculates a deal score from 0 to 10 based on historical price data, "
                 "and gives a plain-English buy-now-or-wait recommendation. "
-                "Use this when a user wants to know where to buy a product for the best price today, "
-                "or whether the current price is a good deal. "
-                "Replaces Keepa Pro and Jungle Scout for cross-retailer deal detection. "
-                "Accepts a product name like 'Sony WH-1000XM5', a model number, or a UPC barcode."
+                "Use this when a user wants to know where to buy a product for the best price today. "
+                "Accepts a product name like 'Sony WH-1000XM5', a model number, or a UPC barcode. "
+                "RETRY POLICY: Call this tool ONCE per product. "
+                "If retailers_found is 0 or search_exhausted is true after one call, "
+                "DO NOT retry with different query variations — the absence IS the final answer. "
+                "Read no_results_advice for what to tell the user. "
+                "Only call again if the user explicitly asks about a different product."
             ),
             inputSchema={
                 "type": "object",
@@ -135,6 +138,9 @@ async def list_tools() -> list[types.Tool]:
                     "product_name":      {"type": "string"},
                     "match_confidence":  {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
                     "retailers_found":   {"type": "integer", "description": "Number of retailers (0-4) that returned a valid price. Data is complete when this is 4 or when remaining retailers are null."},
+                    "search_exhausted":  {"type": ["boolean", "null"], "description": "True when retailers_found is 0 and no further retries will help. Stop retrying if this is true."},
+                    "no_results_reason": {"type": ["string", "null"], "description": "Why no results were found. 'no_matching_listings' = product exists but not listed at these retailers. 'product_not_carried' = retailers don't stock this item. Null when results were found."},
+                    "no_results_advice": {"type": ["string", "null"], "description": "Human-readable suggestion for where to find the product when major retailers don't carry it. Null when results were found."},
                     "amazon":            {"type": ["object", "null"], "description": "Amazon price result. Contains price, effective_price, coupon_available, coupon_text, in_stock, url, title, confidence, size_match, condition. Null if not found."},
                     "walmart":           {"type": ["object", "null"], "description": "Walmart price result. Contains price, effective_price, coupon_available, coupon_text, in_stock, url, title, confidence, size_match, condition. Null if not found."},
                     "target":            {"type": ["object", "null"], "description": "Target price result. Contains price, effective_price, coupon_available, coupon_text, in_stock, url, title, confidence, size_match, condition. Null if not found."},
@@ -158,9 +164,10 @@ async def list_tools() -> list[types.Tool]:
                 "Retrieve the observed price history for a product from the local cache. "
                 "Returns all previously recorded prices across Amazon, Walmart, Target, and Best Buy, "
                 "including the all-time observed low price and how many data points have been collected. "
-                "Use this when a user wants to understand how a product's price has changed over time, "
-                "or to verify whether a current price is genuinely a good deal historically. "
-                "Note: history only exists for products previously queried via compare_prices."
+                "Use this when a user wants to understand how a product's price has changed over time. "
+                "Note: history only exists for products previously queried via compare_prices. "
+                "RETRY POLICY: Call this tool ONCE. "
+                "If data_points is 0, no history exists yet — DO NOT retry with alternate names."
             ),
             inputSchema={
                 "type": "object",
@@ -228,11 +235,11 @@ async def list_tools() -> list[types.Tool]:
             name="check_availability",
             description=(
                 "Check whether a product is currently in stock at Amazon, Walmart, Target, and Best Buy. "
-                "Use this when a user wants to know if a product is available to buy right now "
-                "without needing full price comparison data. "
-                "Returns in-stock status and a direct product URL for each retailer including Best Buy. "
-                "Faster than compare_prices when the user only cares about stock status, "
-                "for example: 'Is the PS5 in stock anywhere right now?'"
+                "Returns in-stock status and a direct URL for each of the four retailers. "
+                "Use this when a user only needs availability, not price data. "
+                "RETRY POLICY: Call this tool ONCE. "
+                "If all retailers return NOT_FOUND or in_stock is false everywhere, "
+                "DO NOT retry with alternate product names — report the result directly."
             ),
             inputSchema={
                 "type": "object",
@@ -253,9 +260,10 @@ async def list_tools() -> list[types.Tool]:
                 "type": "object",
                 "properties": {
                     "product_name": {"type": "string"},
-                    "amazon":       {"type": "object"},
-                    "walmart":      {"type": "object"},
-                    "target":       {"type": "object"},
+                    "amazon":       {"type": "object", "description": "Amazon availability. Contains in_stock (bool), url, confidence."},
+                    "walmart":      {"type": "object", "description": "Walmart availability. Contains in_stock (bool), url, confidence."},
+                    "target":       {"type": "object", "description": "Target availability. Contains in_stock (bool), url, confidence."},
+                    "best_buy":     {"type": "object", "description": "Best Buy availability. Contains in_stock (bool), url, confidence."},
                     "summary":      {"type": "string"},
                 },
                 "required": ["product_name", "summary"],
@@ -407,10 +415,30 @@ async def handle_compare_prices(arguments: dict) -> dict:
         result.setdefault("condition", "new")
         return result
 
+    # Explain zero-result responses so CTX stops retrying the same query
+    if retailers_found == 0:
+        no_results_reason = (
+            "no_matching_listings"
+            if overall == "LOW" else
+            "product_not_carried"
+        )
+        no_results_advice = (
+            "This product may not be carried by Amazon, Walmart, Target, or Best Buy. "
+            "It could be a business/enterprise product sold through specialised channels "
+            "(e.g. HP Business Store, Newegg, B&H Photo, CDW). "
+            "Try a more specific model number or a consumer-oriented product name."
+        )
+    else:
+        no_results_reason = None
+        no_results_advice = None
+
     return {
         "product_name":      canonical_name,
         "match_confidence":  overall,
         "retailers_found":   retailers_found,
+        "no_results_reason": no_results_reason,
+        "no_results_advice": no_results_advice,
+        "search_exhausted":  retailers_found == 0,
         "amazon":            retailer_or_null(amazon),
         "walmart":           retailer_or_null(walmart),
         "target":            retailer_or_null(target),
@@ -487,7 +515,7 @@ async def handle_availability(arguments: dict) -> dict:
     product_query = arguments.get("product", "").strip()
     zip_code      = arguments.get("zip_code", "10001")
     if not product_query:
-        return _error_response("compare_prices", "product parameter is required")
+        return _error_response("check_availability", "product parameter is required")
 
     resolved       = await matcher.resolve(product_query)
     canonical_name = resolved.get("title", product_query)
@@ -495,16 +523,18 @@ async def handle_availability(arguments: dict) -> dict:
     brand          = resolved.get("brand")
     search_term    = resolved.get("model") or canonical_name
 
-    amazon_raw, walmart_raw, target_raw = await asyncio.gather(
+    amazon_raw, walmart_raw, target_raw, best_buy_raw = await asyncio.gather(
         fetch_amazon(search_term, upc, zip_code),
         fetch_walmart(search_term, upc, zip_code),
         fetch_target(search_term, upc, zip_code),
+        fetch_best_buy(search_term, upc, zip_code),
         return_exceptions=True,
     )
 
-    amazon  = matcher.score_retailer_result(amazon_raw,  canonical_name, brand)
-    walmart = matcher.score_retailer_result(walmart_raw, canonical_name, brand)
-    target  = matcher.score_retailer_result(target_raw,  canonical_name, brand)
+    amazon   = matcher.score_retailer_result(amazon_raw,   canonical_name, brand)
+    walmart  = matcher.score_retailer_result(walmart_raw,  canonical_name, brand)
+    target   = matcher.score_retailer_result(target_raw,   canonical_name, brand)
+    best_buy = matcher.score_retailer_result(best_buy_raw, canonical_name, brand)
 
     def avail_label(name, r):
         if r["confidence"] == "NOT_FOUND": return f"{name}: Not found"
@@ -514,24 +544,26 @@ async def handle_availability(arguments: dict) -> dict:
         return f"{name}: ⚠️ Unknown"
 
     in_stock_count = sum(
-        1 for r in [amazon, walmart, target]
+        1 for r in [amazon, walmart, target, best_buy]
         if r.get("in_stock") is True and r["confidence"] != "NOT_FOUND"
     )
     note = (
-        "Available at all three retailers." if in_stock_count == 3
+        "Available at all four retailers." if in_stock_count == 4
         else "Not confirmed in stock at any retailer." if in_stock_count == 0
-        else f"In stock at {in_stock_count} of 3 retailers."
+        else f"In stock at {in_stock_count} of 4 retailers."
     )
 
     return {
         "product_name": canonical_name,
-        "amazon":  {"in_stock": amazon.get("in_stock"),  "url": amazon.get("url"),  "confidence": amazon["confidence"]},
-        "walmart": {"in_stock": walmart.get("in_stock"), "url": walmart.get("url"), "confidence": walmart["confidence"]},
-        "target":  {"in_stock": target.get("in_stock"),  "url": target.get("url"),  "confidence": target["confidence"]},
+        "amazon":    {"in_stock": amazon.get("in_stock"),    "url": amazon.get("url"),    "confidence": amazon["confidence"]},
+        "walmart":   {"in_stock": walmart.get("in_stock"),   "url": walmart.get("url"),   "confidence": walmart["confidence"]},
+        "target":    {"in_stock": target.get("in_stock"),    "url": target.get("url"),    "confidence": target["confidence"]},
+        "best_buy":  {"in_stock": best_buy.get("in_stock"),  "url": best_buy.get("url"),  "confidence": best_buy["confidence"]},
         "summary": " | ".join([
             avail_label("Amazon", amazon),
             avail_label("Walmart", walmart),
             avail_label("Target", target),
+            avail_label("Best Buy", best_buy),
         ]) + f" — {note}",
     }
 
