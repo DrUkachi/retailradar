@@ -138,9 +138,9 @@ async def list_tools() -> list[types.Tool]:
                     "product_name":      {"type": "string"},
                     "match_confidence":  {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
                     "retailers_found":   {"type": "integer", "description": "Number of retailers (0-4) that returned a valid price. Data is complete when this is 4 or when remaining retailers are null."},
-                    "search_exhausted":  {"type": ["boolean", "null"], "description": "True when retailers_found is 0 and no further retries will help. Stop retrying if this is true."},
-                    "no_results_reason": {"type": ["string", "null"], "description": "Why no results were found. 'no_matching_listings' = product exists but not listed at these retailers. 'product_not_carried' = retailers don't stock this item. Null when results were found."},
-                    "no_results_advice": {"type": ["string", "null"], "description": "Human-readable suggestion for where to find the product when major retailers don't carry it. Null when results were found."},
+                    "search_exhausted":  {"type": ["boolean", "null"], "description": "STOP SIGNAL: When true, all four retailers were searched and found nothing. DO NOT call this tool again with any variation of this product name. Present no_results_advice to the user as the final answer."},
+                    "no_results_reason": {"type": ["string", "null"], "description": "Why no results were found. 'no_matching_listings' = not listed at these retailers. Null when results were found."},
+                    "no_results_advice": {"type": ["string", "null"], "description": "FINAL ANSWER STRING: When search_exhausted is true, present this text directly to the user. Do not retry. Do not search for variations."},
                     "amazon":            {"type": ["object", "null"], "description": "Amazon price result. Contains price, effective_price, coupon_available, coupon_text, in_stock, url, title, confidence, size_match, condition. Null if not found."},
                     "walmart":           {"type": ["object", "null"], "description": "Walmart price result. Contains price, effective_price, coupon_available, coupon_text, in_stock, url, title, confidence, size_match, condition. Null if not found."},
                     "target":            {"type": ["object", "null"], "description": "Target price result. Contains price, effective_price, coupon_available, coupon_text, in_stock, url, title, confidence, size_match, condition. Null if not found."},
@@ -186,7 +186,7 @@ async def list_tools() -> list[types.Tool]:
                     "observed_low": {"type": ["number", "null"]},
                     "data_points":  {"type": "integer"},
                     "history":      {"type": "array"},
-                    "message":      {"type": "string"},
+                    "message":      {"type": "string", "description": "If data_points is 0, this explains why. When data_points is 0, this IS the final answer — do not retry."},
                 },
                 "required": ["product", "data_points", "history", "message"],
             },
@@ -423,10 +423,12 @@ async def handle_compare_prices(arguments: dict) -> dict:
             "product_not_carried"
         )
         no_results_advice = (
-            "This product may not be carried by Amazon, Walmart, Target, or Best Buy. "
-            "It could be a business/enterprise product sold through specialised channels "
-            "(e.g. HP Business Store, Newegg, B&H Photo, CDW). "
-            "Try a more specific model number or a consumer-oriented product name."
+            f"No listings found for '{canonical_name}' at Amazon, Walmart, Target, or Best Buy. "
+            "THIS IS THE FINAL ANSWER — do not retry with different product names or variations. "
+            "Present this message directly to the user: "
+            f"'{canonical_name}' is not listed at major consumer retailers. "
+            "It may be a business/enterprise product available through specialised channels "
+            "such as the HP Business Store, Newegg, B&H Photo, or CDW."
         )
     else:
         no_results_reason = None
