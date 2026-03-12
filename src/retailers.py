@@ -37,13 +37,19 @@ def _detect_condition(title: str) -> str:
             return "renewed" if "renew" in kw else "used"
     return "new"
 
-def _parse_price(price_str: str) -> Optional[float]:
-    """Extract a float from '$279.99', '279.99', '$279', etc."""
+def _parse_price(price_str: str, max_usd: float = 50_000.0) -> Optional[float]:
+    """Extract a float from '$279.99', '279.99', '$279', etc.
+    Rejects values above max_usd to filter out foreign-currency amounts
+    (e.g. NGN 1,041,782 parsed as 1041782.22 would be rejected).
+    """
     if not price_str:
         return None
     cleaned = re.sub(r"[^\d.]", "", str(price_str))
     try:
-        return round(float(cleaned), 2) if cleaned else None
+        value = round(float(cleaned), 2) if cleaned else None
+        if value and value > max_usd:
+            return None  # Likely a foreign currency amount, not USD
+        return value
     except ValueError:
         return None
 
@@ -134,6 +140,8 @@ async def fetch_amazon(
                     "engine":        "amazon",
                     "k":             query,
                     "amazon_domain": "amazon.com",
+                    "gl":            "us",
+                    "hl":            "en",
                     "api_key":       SERPAPI_KEY,
                 },
             )
@@ -159,6 +167,8 @@ async def fetch_amazon(
                         "engine":        "amazon_product",
                         "asin":          asin,
                         "amazon_domain": "amazon.com",
+                        "gl":            "us",
+                        "hl":            "en",
                         "api_key":       SERPAPI_KEY,
                     },
                 )
@@ -260,6 +270,8 @@ async def fetch_best_buy(
                 params={
                     "engine":  "best_buy",
                     "q":       query,
+                    "gl":      "us",
+                    "hl":      "en",
                     "api_key": SERPAPI_KEY,
                 },
             )
