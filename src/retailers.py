@@ -142,6 +142,7 @@ async def fetch_amazon(
                     "amazon_domain": "amazon.com",
                     "gl":            "us",
                     "hl":            "en",
+                    "location":      "United States",
                     "api_key":       SERPAPI_KEY,
                 },
             )
@@ -169,6 +170,7 @@ async def fetch_amazon(
                         "amazon_domain": "amazon.com",
                         "gl":            "us",
                         "hl":            "en",
+                        "location":      "United States",
                         "api_key":       SERPAPI_KEY,
                     },
                 )
