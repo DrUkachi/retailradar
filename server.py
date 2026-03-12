@@ -303,6 +303,7 @@ async def call_tool(name: str, arguments: dict[str, Any]):
 async def handle_compare_prices(arguments: dict) -> dict:
     product_query = arguments.get("product", "").strip()
     zip_code      = arguments.get("zip_code", "10001")
+    size          = arguments.get("size", "").strip() or None
     if not product_query:
         return _error_response("compare_prices", "product parameter is required")
 
