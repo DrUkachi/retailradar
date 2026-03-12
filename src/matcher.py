@@ -293,10 +293,7 @@ class ProductMatcher:
             confidence = "MEDIUM"
         else:
             confidence = "LOW"
-        
 
-        size_match = None
-        size_note  = ""
         note = variant_warning or size_note or ""
 
         return {
@@ -371,35 +368,35 @@ class ProductMatcher:
 
     def _check_size_match(self, requested_size: str, title: str) -> bool | None:
         """
-        Check if the retailer result title confirms the requested size.
-        Normalises US shoe/clothing sizes, numeric sizes, and EU sizes.
-        Returns True if confirmed, False if different size found, None if no size info in title.
+        Returns True if title confirms requested size, False if different size found,
+        None if title has no size information at all.
+        Extracts sizes from:
+          1. Explicit labels: "size: 10.5", "size 11", "sz 9"
+          2. Decimal numbers: "10.5", "9.5 m us"
+          3. Whole + US suffix: "10 m us", "11 w us"
+        Model numbers like "315122-111" are intentionally excluded.
         """
-        def normalise_size(s: str) -> str:
-            s = s.lower().strip()
-            s = re.sub(r"(us|eu|uk|size|sz|women|men|womens|mens|'s)", "", s)
+        def norm(s: str) -> str:
+            s = re.sub(r"(us|eu|uk|size|sz|women|men|womens|mens)", "", s.lower())
             s = re.sub(r"[^0-9.]", "", s).strip()
-            # Normalise "11.0" → "11", "9.5" stays "9.5"
             try:
                 f = float(s)
                 return str(int(f)) if f == int(f) else str(f)
             except (ValueError, OverflowError):
                 return s
 
-        req_norm  = normalise_size(requested_size)
-        title_low = title.lower()
+        req = norm(requested_size)
+        t   = title.lower()
+        candidates = []
+        candidates += re.findall(r"(?:size|sz)[:\s]+(\d{1,2}(?:\.\d)?)", t)
+        candidates += re.findall(r"\b(\d{1,2}\.\d)\b", t)
+        candidates += re.findall(r"\b(\d{1,2})\s+(?:m|w)\s+us\b", t)
 
-        # Find all size-like patterns in title: "size 11", "11.0", "US 10.5", etc.
-        size_patterns = re.findall(
-            r"(?:size|sz|us|uk|eu)?\s*(\d{1,2}(?:\.\d)?)",
-            title_low
-        )
+        if not candidates:
+            return None
+        title_sizes = {norm(s) for s in candidates if norm(s)}
+        return req in title_sizes if title_sizes else None
 
-        if not size_patterns:
-            return None  # title has no size info — can't confirm or deny
-
-        title_sizes = {normalise_size(s) for s in size_patterns if normalise_size(s)}
-        return req_norm in title_sizes
 
     def _not_found(self, note: str = "") -> dict:
         return {
