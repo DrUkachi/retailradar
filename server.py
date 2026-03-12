@@ -20,7 +20,7 @@ from mcp.server.lowlevel import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 
 from src.matcher import ProductMatcher
-from src.retailers import fetch_amazon, fetch_walmart, fetch_target
+from src.retailers import fetch_amazon, fetch_walmart, fetch_target, fetch_best_buy
 from src.scorer import DealScorer
 from src.cache import PriceCache
 
