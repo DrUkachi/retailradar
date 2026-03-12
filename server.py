@@ -101,7 +101,7 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="compare_prices",
             description=(
-                "Compare real-time product prices across Amazon, Walmart, and Target. "
+                "Compare real-time product prices across Amazon, Walmart, Target, and Best Buy. "
                 "Returns current prices from all three retailers, identifies the cheapest option, "
                 "calculates a deal score from 0 to 10 based on historical price data, "
                 "and gives a plain-English buy-now-or-wait recommendation. "
@@ -134,10 +134,11 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "product_name":      {"type": "string"},
                     "match_confidence":  {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
-                    "retailers_found":   {"type": "integer", "description": "Number of retailers (0-3) that returned a valid price. Use this to know if data is complete."},
-                    "amazon":            {"type": ["object", "null"], "description": "Amazon price result. Contains price, in_stock, url, title, confidence, condition ('new'|'renewed'|'used'). Null if no matching product found."},
-                    "walmart":           {"type": ["object", "null"], "description": "Walmart price result. Contains price, in_stock, url, title, confidence, condition ('new'|'renewed'|'used'). Null if no matching product found."},
-                    "target":            {"type": ["object", "null"], "description": "Target price result. Contains price, in_stock, url, title, confidence, condition ('new'|'renewed'|'used'). Null if no matching product found."},
+                    "retailers_found":   {"type": "integer", "description": "Number of retailers (0-4) that returned a valid price. Data is complete when this is 4 or when remaining retailers are null."},
+                    "amazon":            {"type": ["object", "null"], "description": "Amazon price result. Contains price, effective_price, coupon_available, coupon_text, in_stock, url, title, confidence, size_match, condition. Null if not found."},
+                    "walmart":           {"type": ["object", "null"], "description": "Walmart price result. Contains price, effective_price, coupon_available, coupon_text, in_stock, url, title, confidence, size_match, condition. Null if not found."},
+                    "target":            {"type": ["object", "null"], "description": "Target price result. Contains price, effective_price, coupon_available, coupon_text, in_stock, url, title, confidence, size_match, condition. Null if not found."},
+                    "best_buy":          {"type": ["object", "null"], "description": "Best Buy price result. Contains price, effective_price, coupon_available, coupon_text, in_stock, url, title, confidence, size_match, condition. Null if not found. Best Buy is especially strong for electronics, laptops, TVs, and headphones."},
                     "cheapest_retailer": {"type": "string", "description": "Name of cheapest retailer. Empty string if no prices found."},
                     "cheapest_price":    {"type": "number", "description": "Cheapest price found. 0 if no prices found."},
                     "price_spread_pct":  {"type": "number", "description": "Percentage difference between highest and lowest price. 0 when fewer than 2 retailers returned prices."},
@@ -155,7 +156,7 @@ async def list_tools() -> list[types.Tool]:
             name="get_price_history",
             description=(
                 "Retrieve the observed price history for a product from the local cache. "
-                "Returns all previously recorded prices across Amazon, Walmart, and Target, "
+                "Returns all previously recorded prices across Amazon, Walmart, Target, and Best Buy, "
                 "including the all-time observed low price and how many data points have been collected. "
                 "Use this when a user wants to understand how a product's price has changed over time, "
                 "or to verify whether a current price is genuinely a good deal historically. "
@@ -226,10 +227,10 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="check_availability",
             description=(
-                "Check whether a product is currently in stock at Amazon, Walmart, and Target. "
+                "Check whether a product is currently in stock at Amazon, Walmart, Target, and Best Buy. "
                 "Use this when a user wants to know if a product is available to buy right now "
                 "without needing full price comparison data. "
-                "Returns in-stock status and a direct product URL for each retailer. "
+                "Returns in-stock status and a direct product URL for each retailer including Best Buy. "
                 "Faster than compare_prices when the user only cares about stock status, "
                 "for example: 'Is the PS5 in stock anywhere right now?'"
             ),
@@ -303,6 +304,7 @@ async def call_tool(name: str, arguments: dict[str, Any]):
 async def handle_compare_prices(arguments: dict) -> dict:
     product_query = arguments.get("product", "").strip()
     zip_code      = arguments.get("zip_code", "10001")
+    size          = arguments.get("size", "").strip() or None
     if not product_query:
         return _error_response("compare_prices", "product parameter is required")
 
@@ -312,35 +314,49 @@ async def handle_compare_prices(arguments: dict) -> dict:
     brand          = resolved.get("brand")
     search_term    = resolved.get("model") or canonical_name
 
-    amazon_raw, walmart_raw, target_raw = await asyncio.gather(
-        fetch_amazon(search_term, upc, zip_code),
-        fetch_walmart(search_term, upc, zip_code),
-        fetch_target(search_term, upc, zip_code),
+    amazon_raw, walmart_raw, target_raw, best_buy_raw = await asyncio.gather(
+        fetch_amazon(search_term, upc, zip_code, size=size),
+        fetch_walmart(search_term, upc, zip_code, size=size),
+        fetch_target(search_term, upc, zip_code, size=size),
+        fetch_best_buy(search_term, upc, zip_code, size=size),
         return_exceptions=True,
     )
 
-    amazon  = matcher.score_retailer_result(amazon_raw,  canonical_name, brand)
-    walmart = matcher.score_retailer_result(walmart_raw, canonical_name, brand)
-    target  = matcher.score_retailer_result(target_raw,  canonical_name, brand)
+    amazon   = matcher.score_retailer_result(amazon_raw,   canonical_name, brand, requested_size=size)
+    walmart  = matcher.score_retailer_result(walmart_raw,  canonical_name, brand, requested_size=size)
+    target   = matcher.score_retailer_result(target_raw,   canonical_name, brand, requested_size=size)
+    best_buy = matcher.score_retailer_result(best_buy_raw, canonical_name, brand, requested_size=size)
 
-    retailer_map = {"amazon": amazon, "walmart": walmart, "target": target}
+    retailer_map = {"amazon": amazon, "walmart": walmart, "target": target, "best_buy": best_buy}
 
+    def _eff(r):
+        """Return effective price (post-coupon) if available, else raw price."""
+        ep = r.get("effective_price")
+        p  = r.get("price")
+        return ep if isinstance(ep, (int, float)) else p
+
+    # valid_prices: all retailers with a real price (any confidence except NOT_FOUND).
+    # Used for cheapest_retailer, deal scoring, spread, and verdict.
     valid_prices = {
-        k: v["price"]
+        k: _eff(v)
         for k, v in retailer_map.items()
-        if isinstance(v.get("price"), (int, float)) and v.get("confidence") in ("HIGH", "MEDIUM")
+        if isinstance(_eff(v), (int, float)) and v.get("confidence") != "NOT_FOUND"
     }
 
-    # Also track any found prices regardless of confidence (for condition context + fallback cheapest)
-    all_found_prices = {
-        k: v["price"]
+    # cache_prices: only HIGH/MEDIUM confidence results go into price history.
+    # LOW confidence results may be wrong products — don't let them set historical lows.
+    cache_prices = {
+        k: _eff(v)
         for k, v in retailer_map.items()
-        if isinstance(v.get("price"), (int, float)) and v.get("confidence") != "NOT_FOUND"
+        if isinstance(_eff(v), (int, float)) and v.get("confidence") in ("HIGH", "MEDIUM")
     }
 
-    cache.update(canonical_name, valid_prices)
+    all_found_prices = valid_prices  # alias for price_context generator
+
+    cache.update(canonical_name, cache_prices)
     rolling_min = cache.get_rolling_min(canonical_name)
-    deal_score  = scorer.compute_deal_score(valid_prices, rolling_min)
+    data_points = len(cache.get_history(canonical_name))
+    deal_score  = scorer.compute_deal_score(valid_prices, rolling_min, data_points)
 
     cheapest_retailer = cheapest_price = price_spread_pct = None
     if valid_prices:
@@ -363,6 +379,7 @@ async def handle_compare_prices(arguments: dict) -> dict:
         price_spread_pct=price_spread_pct,
         deal_score=deal_score,
         rolling_min=rolling_min,
+        data_points=data_points,
     )
 
     # Condition warning + market trend context sentence
@@ -373,7 +390,7 @@ async def handle_compare_prices(arguments: dict) -> dict:
         cheapest_price=cheapest_price,
     )
 
-    confidences = [amazon["confidence"], walmart["confidence"], target["confidence"]]
+    confidences = [amazon["confidence"], walmart["confidence"], target["confidence"], best_buy["confidence"]]
     if confidences.count("HIGH") >= 2:
         overall = "HIGH"
     elif "HIGH" in confidences or confidences.count("MEDIUM") >= 2:
@@ -381,7 +398,7 @@ async def handle_compare_prices(arguments: dict) -> dict:
     else:
         overall = "LOW"
 
-    retailers_found = sum(1 for r in [amazon, walmart, target] if r.get("price") is not None)
+    retailers_found = sum(1 for r in [amazon, walmart, target, best_buy] if r.get("price") is not None)
 
     def retailer_or_null(r):
         if r.get("confidence") == "NOT_FOUND":
@@ -397,6 +414,7 @@ async def handle_compare_prices(arguments: dict) -> dict:
         "amazon":            retailer_or_null(amazon),
         "walmart":           retailer_or_null(walmart),
         "target":            retailer_or_null(target),
+        "best_buy":          retailer_or_null(best_buy),
         "cheapest_retailer": cheapest_retailer or "",
         "cheapest_price":    cheapest_price or 0,
         "price_spread_pct":  price_spread_pct or 0,
