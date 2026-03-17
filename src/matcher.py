@@ -317,7 +317,7 @@ class ProductMatcher:
             # Pass through coupon fields from raw retailer data
             "coupon_available": raw.get("coupon_available", False),
             "coupon_text":      raw.get("coupon_text", ""),
-            "coupon_discount":  raw.get("coupon_discount"),
+            "coupon_discount":  raw.get("coupon_discount") or 0,
             "effective_price":  raw.get("effective_price") or raw.get("price"),
         }
 
@@ -485,7 +485,7 @@ class ProductMatcher:
             "size_match":       None,
             "coupon_available": False,
             "coupon_text":      "",
-            "coupon_discount":  None,
+            "coupon_discount":  0,
             "effective_price":  None,
             "note":             note or "Product not found at this retailer",
         }
