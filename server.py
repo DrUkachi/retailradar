@@ -323,10 +323,10 @@ async def handle_compare_prices(arguments: dict) -> dict:
     search_term    = resolved.get("model") or canonical_name
 
     amazon_raw, walmart_raw, target_raw, best_buy_raw = await asyncio.gather(
-        fetch_amazon(search_term, upc, zip_code, size=size),
-        fetch_walmart(search_term, upc, zip_code, size=size),
-        fetch_target(search_term, upc, zip_code, size=size),
-        fetch_best_buy(search_term, upc, zip_code, size=size),
+        asyncio.wait_for(fetch_amazon(search_term, upc, zip_code, size=size),   timeout=9),
+        asyncio.wait_for(fetch_walmart(search_term, upc, zip_code, size=size),  timeout=7),
+        asyncio.wait_for(fetch_target(search_term, upc, zip_code, size=size),   timeout=9),
+        asyncio.wait_for(fetch_best_buy(search_term, upc, zip_code, size=size), timeout=9),
         return_exceptions=True,
     )
 
@@ -543,10 +543,10 @@ async def handle_availability(arguments: dict) -> dict:
     search_term    = resolved.get("model") or canonical_name
 
     amazon_raw, walmart_raw, target_raw, best_buy_raw = await asyncio.gather(
-        fetch_amazon(search_term, upc, zip_code),
-        fetch_walmart(search_term, upc, zip_code),
-        fetch_target(search_term, upc, zip_code),
-        fetch_best_buy(search_term, upc, zip_code),
+        asyncio.wait_for(fetch_amazon(search_term, upc, zip_code),   timeout=9),
+        asyncio.wait_for(fetch_walmart(search_term, upc, zip_code),  timeout=7),
+        asyncio.wait_for(fetch_target(search_term, upc, zip_code),   timeout=9),
+        asyncio.wait_for(fetch_best_buy(search_term, upc, zip_code), timeout=9),
         return_exceptions=True,
     )
 
