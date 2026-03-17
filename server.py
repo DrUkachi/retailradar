@@ -107,6 +107,9 @@ async def list_tools() -> list[types.Tool]:
                 "and gives a plain-English buy-now-or-wait recommendation. "
                 "Use this when a user wants to know where to buy a product for the best price today. "
                 "Accepts a product name like 'Sony WH-1000XM5', a model number, or a UPC barcode. "
+                "SIZE HANDLING: If the user mentions a size (e.g. 'Nike Air Force 1 size 10.5'), "
+                "pass the product name WITHOUT the size in the product field, and pass the size "
+                "value separately in the size field. Never embed size in the product string. "
                 "RETRY POLICY: Call this tool ONCE per product. "
                 "If retailers_found is 0 or search_exhausted is true after one call, "
                 "DO NOT retry with different query variations — the absence IS the final answer. "
@@ -122,6 +125,16 @@ async def list_tools() -> list[types.Tool]:
                             "The product to search for. Can be a product name "
                             "('Sony WH-1000XM5'), model number ('RTX 4090'), "
                             "or UPC barcode ('043396630833')."
+                        ),
+                    },
+                    "size": {
+                        "type": "string",
+                        "description": (
+                            "Clothing or shoe size to filter results by, e.g. '10.5', '11', 'M', 'XL'. "
+                            "IMPORTANT: When the user mentions a size (e.g. 'size 10.5', 'size large'), "
+                            "extract it and pass it here separately — do NOT include it in the product string. "
+                            "Correct: product='Nike Air Force 1 Low', size='10.5'. "
+                            "Wrong: product='Nike Air Force 1 Low size 10.5'."
                         ),
                     },
                     "zip_code": {
@@ -381,12 +394,33 @@ async def call_tool(name: str, arguments: dict[str, Any]):
 
 # ── Handlers ───────────────────────────────────────────────────────────────────
 
+def _extract_size_from_query(product_query: str, explicit_size: str | None):
+    """
+    Defensive size extraction — handles cases where the CTX agent ignores the
+    separate `size` parameter and stuffs it into the product string instead.
+    e.g. "Nike Air Force 1 Low size 10.5" → product="Nike Air Force 1 Low", size="10.5"
+    explicit_size always takes priority when already provided correctly.
+    """
+    import re as _re
+    if explicit_size:
+        return product_query, explicit_size
+    m = _re.search(r'\b(?:size|sz)\s+([A-Za-z0-9\.]+)\b', product_query, _re.IGNORECASE)
+    if m:
+        size  = m.group(1)
+        clean = _re.sub(r'\b(?:size|sz)\s+[A-Za-z0-9\.]+\b', '', product_query, flags=_re.IGNORECASE).strip()
+        clean = _re.sub(r'\s{2,}', ' ', clean)
+        return clean, size
+    return product_query, None
+
+
 async def handle_compare_prices(arguments: dict) -> dict:
     product_query = arguments.get("product", "").strip()
     zip_code      = arguments.get("zip_code", "10001")
-    size          = arguments.get("size", "").strip() or None
+    _raw_size     = arguments.get("size", "").strip() or None
     if not product_query:
         return _error_response("compare_prices", "product parameter is required")
+    # Defensively extract size if agent stuffed it into the product string
+    product_query, size = _extract_size_from_query(product_query, _raw_size)
 
     resolved       = await matcher.resolve(product_query)
     canonical_name = resolved.get("title", product_query)
@@ -605,8 +639,10 @@ async def handle_deal_score(arguments: dict) -> dict:
 async def handle_availability(arguments: dict) -> dict:
     product_query = arguments.get("product", "").strip()
     zip_code      = arguments.get("zip_code", "10001")
+    _raw_size     = arguments.get("size", "").strip() or None
     if not product_query:
         return _error_response("check_availability", "product parameter is required")
+    product_query, size = _extract_size_from_query(product_query, _raw_size)
 
     resolved       = await matcher.resolve(product_query)
     canonical_name = resolved.get("title", product_query)
