@@ -429,10 +429,10 @@ async def handle_compare_prices(arguments: dict) -> dict:
     search_term    = resolved.get("model") or canonical_name
 
     amazon_raw, walmart_raw, target_raw, best_buy_raw = await asyncio.gather(
-        asyncio.wait_for(fetch_amazon(search_term, upc, zip_code, size=size),   timeout=9),
-        asyncio.wait_for(fetch_walmart(search_term, upc, zip_code, size=size),  timeout=7),
-        asyncio.wait_for(fetch_target(search_term, upc, zip_code, size=size),   timeout=9),
-        asyncio.wait_for(fetch_best_buy(search_term, upc, zip_code, size=size), timeout=9),
+        asyncio.wait_for(fetch_amazon(search_term, upc, zip_code, size=size),   timeout=14),
+        asyncio.wait_for(fetch_walmart(search_term, upc, zip_code, size=size),  timeout=10),
+        asyncio.wait_for(fetch_target(search_term, upc, zip_code, size=size),   timeout=14),
+        asyncio.wait_for(fetch_best_buy(search_term, upc, zip_code, size=size), timeout=14),
         return_exceptions=True,
     )
 
@@ -549,9 +549,10 @@ async def handle_compare_prices(arguments: dict) -> dict:
             f"No listings found for '{canonical_name}' at Amazon, Walmart, Target, or Best Buy. "
             "THIS IS THE FINAL ANSWER — do not retry with different product names or variations. "
             "Present this message directly to the user: "
-            f"'{canonical_name}' is not listed at major consumer retailers. "
-            "It may be a business/enterprise product available through specialised channels "
-            "such as the HP Business Store, Newegg, B&H Photo, or CDW."
+            f"'{canonical_name}' is not currently listed at the major consumer retailers checked "
+            "(Amazon, Walmart, Target, Best Buy). This may be due to the product being sold out, "
+            "discontinued, or only available through specialised channels like brand stores, "
+            "boutique retailers, or secondary markets."
         )
     else:
         no_results_reason = None
@@ -651,10 +652,10 @@ async def handle_availability(arguments: dict) -> dict:
     search_term    = resolved.get("model") or canonical_name
 
     amazon_raw, walmart_raw, target_raw, best_buy_raw = await asyncio.gather(
-        asyncio.wait_for(fetch_amazon(search_term, upc, zip_code),   timeout=9),
-        asyncio.wait_for(fetch_walmart(search_term, upc, zip_code),  timeout=7),
-        asyncio.wait_for(fetch_target(search_term, upc, zip_code),   timeout=9),
-        asyncio.wait_for(fetch_best_buy(search_term, upc, zip_code), timeout=9),
+        asyncio.wait_for(fetch_amazon(search_term, upc, zip_code),   timeout=14),
+        asyncio.wait_for(fetch_walmart(search_term, upc, zip_code),  timeout=10),
+        asyncio.wait_for(fetch_target(search_term, upc, zip_code),   timeout=14),
+        asyncio.wait_for(fetch_best_buy(search_term, upc, zip_code), timeout=14),
         return_exceptions=True,
     )
 
