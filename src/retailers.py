@@ -215,7 +215,7 @@ def _parse_amazon_product(product: dict, asin: str) -> dict:
         "condition":        _detect_condition(title),
         "coupon_available": coupon_available,
         "coupon_text":      coupon_text,
-        "coupon_discount":  coupon_discount,
+        "coupon_discount":  coupon_discount or 0,
         "effective_price":  effective_price,
         "url":              f"https://www.amazon.com/dp/{asin}",
     }
@@ -232,7 +232,7 @@ def _parse_amazon_search_result(result: dict) -> dict:
         "condition":        _detect_condition(title),
         "coupon_available": False,
         "coupon_text":      "",
-        "coupon_discount":  None,
+        "coupon_discount":  0,
         "effective_price":  price,
         "url":              result.get("link", ""),
     }
@@ -324,7 +324,7 @@ async def fetch_best_buy(
                 "condition":        _detect_condition(title),
                 "coupon_available": coupon_available,
                 "coupon_text":      coupon_text,
-                "coupon_discount":  coupon_discount,
+                "coupon_discount":  coupon_discount or 0,
                 "effective_price":  effective_price,
                 "url":              url,
             }
@@ -402,7 +402,7 @@ async def fetch_walmart(
                 "condition":        _detect_condition(title),
                 "coupon_available": coupon_available,
                 "coupon_text":      coupon_text,
-                "coupon_discount":  coupon_discount,
+                "coupon_discount":  coupon_discount or 0,
                 "effective_price":  effective_price,
                 "url":              f"https://www.walmart.com{url_path}" if url_path.startswith("/") else (url_path or walmart_search_url),
             }
@@ -471,7 +471,7 @@ async def fetch_target(
                 "condition":        _detect_condition(title),
                 "coupon_available": coupon_available,
                 "coupon_text":      coupon_text,
-                "coupon_discount":  coupon_discount,
+                "coupon_discount":  coupon_discount or 0,
                 "effective_price":  effective_price,
                 "url":              top.get("link", ""),
             }
