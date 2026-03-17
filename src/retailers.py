@@ -22,10 +22,10 @@ REDCIRCLE_KEY  = os.getenv("REDCIRCLE_KEY", "")
 # Per-retailer timeouts — tight enough to fail fast, not so tight we miss slow APIs
 # asyncio.wait_for wraps each coroutine individually so one slow retailer
 # doesn't block the others (unlike a shared timeout on asyncio.gather).
-AMAZON_TIMEOUT   = 8   # single search call now — no detail call
-WALMART_TIMEOUT  = 6   # ScraperAPI hard cap — Walmart is the slowest
-TARGET_TIMEOUT   = 8
-BESTBUY_TIMEOUT  = 8
+AMAZON_TIMEOUT   = 13  # SerpApi free tier can be slow — give headroom under wait_for(14)
+WALMART_TIMEOUT  = 9   # ScraperAPI — under wait_for(10)
+TARGET_TIMEOUT   = 13
+BESTBUY_TIMEOUT  = 13
 
 def _make_client(timeout: float) -> httpx.AsyncClient:
     """Create an httpx client with connection pooling and keep-alive enabled."""
