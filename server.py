@@ -141,10 +141,82 @@ async def list_tools() -> list[types.Tool]:
                     "search_exhausted":  {"type": "boolean", "description": "STOP SIGNAL: When true, all four retailers were searched and found nothing. DO NOT retry. Present no_results_advice to the user as the final answer."},
                     "no_results_reason": {"type": "string", "description": "Why no results were found. Empty string when results were found. 'no_matching_listings' = not listed at these retailers."},
                     "no_results_advice": {"type": "string", "description": "FINAL ANSWER STRING: When search_exhausted is true, present this text directly to the user. Empty string when results were found. Do not retry."},
-                    "amazon":            {"type": "object", "description": "Amazon result. ALWAYS a non-null object. Use found=true/false to check if listed. If not_listed=true, retailer does not carry this product (different from out-of-stock). price=0 and url='' when not listed."},
-                    "walmart":           {"type": "object", "description": "Walmart result. ALWAYS a non-null object. Use found=true/false to check if listed. If not_listed=true, retailer does not carry this product (different from out-of-stock). price=0 and url='' when not listed."},
-                    "target":            {"type": "object", "description": "Target result. ALWAYS a non-null object. Use found=true/false to check if listed. If not_listed=true, retailer does not carry this product (different from out-of-stock). price=0 and url='' when not listed."},
-                    "best_buy":          {"type": "object", "description": "Best Buy result. ALWAYS a non-null object. Use found=true/false to check if listed. If not_listed=true, Best Buy does not carry this product. Best Buy is strong for electronics, laptops, TVs, headphones."},
+                    "amazon":       {
+                        "type": "object",
+                        "description": "ALWAYS a non-null object. Check found=true/false before reading price/url. If not_listed=true, this retailer does not carry the product — all numeric fields will be 0 and string fields will be empty string. This is NOT a bug.",
+                        "properties": {
+                            "found":            {"type": "boolean", "description": "true if retailer has a listing, false if not. Always present."},
+                            "not_listed":       {"type": "boolean", "description": "true when retailer does not carry this product. false when found=true."},
+                            "price":            {"type": "number",  "description": "Listed price in USD. 0 when not_listed=true — this is correct, NOT a missing value."},
+                            "effective_price":  {"type": "number",  "description": "Price after coupon. Equals price when no coupon. 0 when not_listed=true."},
+                            "in_stock":         {"type": "boolean"},
+                            "url":              {"type": "string",  "description": "Product URL. Empty string when not_listed=true."},
+                            "title":            {"type": "string",  "description": "Product title. Empty string when not_listed=true."},
+                            "confidence":       {"type": "string",  "enum": ["HIGH", "MEDIUM", "LOW", "NOT_FOUND"]},
+                            "coupon_available": {"type": "boolean"},
+                            "coupon_text":      {"type": "string"},
+                            "coupon_discount":  {"type": "number",  "description": "Coupon discount amount in USD. 0 means no coupon — this is the correct default, NOT a missing value. Only non-zero when coupon_available=true."},
+                            "size_match":       {"type": "boolean"},
+                            "condition":        {"type": "string",  "description": "Product condition: new, renewed, used. Empty string when not_listed=true."}
+                        }
+                    },
+                    "walmart":      {
+                        "type": "object",
+                        "description": "ALWAYS a non-null object. Check found=true/false before reading price/url. If not_listed=true, this retailer does not carry the product — all numeric fields will be 0 and string fields will be empty string. This is NOT a bug.",
+                        "properties": {
+                            "found":            {"type": "boolean", "description": "true if retailer has a listing, false if not. Always present."},
+                            "not_listed":       {"type": "boolean", "description": "true when retailer does not carry this product. false when found=true."},
+                            "price":            {"type": "number",  "description": "Listed price in USD. 0 when not_listed=true — this is correct, NOT a missing value."},
+                            "effective_price":  {"type": "number",  "description": "Price after coupon. Equals price when no coupon. 0 when not_listed=true."},
+                            "in_stock":         {"type": "boolean"},
+                            "url":              {"type": "string",  "description": "Product URL. Empty string when not_listed=true."},
+                            "title":            {"type": "string",  "description": "Product title. Empty string when not_listed=true."},
+                            "confidence":       {"type": "string",  "enum": ["HIGH", "MEDIUM", "LOW", "NOT_FOUND"]},
+                            "coupon_available": {"type": "boolean"},
+                            "coupon_text":      {"type": "string"},
+                            "coupon_discount":  {"type": "number",  "description": "Coupon discount amount in USD. 0 means no coupon — this is the correct default, NOT a missing value. Only non-zero when coupon_available=true."},
+                            "size_match":       {"type": "boolean"},
+                            "condition":        {"type": "string",  "description": "Product condition: new, renewed, used. Empty string when not_listed=true."}
+                        }
+                    },
+                    "target":       {
+                        "type": "object",
+                        "description": "ALWAYS a non-null object. Check found=true/false before reading price/url. If not_listed=true, this retailer does not carry the product — all numeric fields will be 0 and string fields will be empty string. This is NOT a bug.",
+                        "properties": {
+                            "found":            {"type": "boolean", "description": "true if retailer has a listing, false if not. Always present."},
+                            "not_listed":       {"type": "boolean", "description": "true when retailer does not carry this product. false when found=true."},
+                            "price":            {"type": "number",  "description": "Listed price in USD. 0 when not_listed=true — this is correct, NOT a missing value."},
+                            "effective_price":  {"type": "number",  "description": "Price after coupon. Equals price when no coupon. 0 when not_listed=true."},
+                            "in_stock":         {"type": "boolean"},
+                            "url":              {"type": "string",  "description": "Product URL. Empty string when not_listed=true."},
+                            "title":            {"type": "string",  "description": "Product title. Empty string when not_listed=true."},
+                            "confidence":       {"type": "string",  "enum": ["HIGH", "MEDIUM", "LOW", "NOT_FOUND"]},
+                            "coupon_available": {"type": "boolean"},
+                            "coupon_text":      {"type": "string"},
+                            "coupon_discount":  {"type": "number",  "description": "Coupon discount amount in USD. 0 means no coupon — this is the correct default, NOT a missing value. Only non-zero when coupon_available=true."},
+                            "size_match":       {"type": "boolean"},
+                            "condition":        {"type": "string",  "description": "Product condition: new, renewed, used. Empty string when not_listed=true."}
+                        }
+                    },
+                    "best_buy":     {
+                        "type": "object",
+                        "description": "ALWAYS a non-null object. Check found=true/false before reading price/url. If not_listed=true, this retailer does not carry the product — all numeric fields will be 0 and string fields will be empty string. This is NOT a bug.",
+                        "properties": {
+                            "found":            {"type": "boolean", "description": "true if retailer has a listing, false if not. Always present."},
+                            "not_listed":       {"type": "boolean", "description": "true when retailer does not carry this product. false when found=true."},
+                            "price":            {"type": "number",  "description": "Listed price in USD. 0 when not_listed=true — this is correct, NOT a missing value."},
+                            "effective_price":  {"type": "number",  "description": "Price after coupon. Equals price when no coupon. 0 when not_listed=true."},
+                            "in_stock":         {"type": "boolean"},
+                            "url":              {"type": "string",  "description": "Product URL. Empty string when not_listed=true."},
+                            "title":            {"type": "string",  "description": "Product title. Empty string when not_listed=true."},
+                            "confidence":       {"type": "string",  "enum": ["HIGH", "MEDIUM", "LOW", "NOT_FOUND"]},
+                            "coupon_available": {"type": "boolean"},
+                            "coupon_text":      {"type": "string"},
+                            "coupon_discount":  {"type": "number",  "description": "Coupon discount amount in USD. 0 means no coupon — this is the correct default, NOT a missing value. Only non-zero when coupon_available=true."},
+                            "size_match":       {"type": "boolean"},
+                            "condition":        {"type": "string",  "description": "Product condition: new, renewed, used. Empty string when not_listed=true."}
+                        }
+                    },
                     "cheapest_retailer": {"type": "string", "description": "Name of cheapest retailer. Empty string if no prices found."},
                     "cheapest_price":    {"type": "number", "description": "Cheapest price found. 0 if no prices found."},
                     "price_spread_pct":  {"type": "number", "description": "Percentage difference between highest and lowest price. 0 when fewer than 2 retailers returned prices."},
