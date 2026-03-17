@@ -111,6 +111,13 @@ STOPWORDS = {
     "latest", "model", "version", "edition", "pack", "set",
 }
 
+# Words excluded from model-number normalisation — they look like model prefixes
+# but are actually common English words (inch4K, pro2, gen3 etc).
+MODEL_NUMBER_COMMON_WORDS = {
+    'inch', 'pack', 'size', 'port', 'core', 'band', 'gen',
+    'pro',  'max',  'mini', 'plus', 'ultra', 'slim', 'lite',
+}
+
 ACCESSORY_KEYWORDS = [
     "case", "cover", "screen protector", "tempered glass", "charger",
     "cable", "stand", "skin", "sleeve", "pouch", "holder", "mount",
@@ -314,12 +321,79 @@ class ProductMatcher:
             "effective_price":  raw.get("effective_price") or raw.get("price"),
         }
 
+    def _normalise_model_numbers(self, text: str) -> str:
+        """
+        Collapse hyphens/spaces inside model-number tokens so variants
+        like WH-1000XM5 and WH1000XM5 normalise to the same string.
+        Excludes common English words (inch, pro, gen etc) to avoid
+        collapsing phrases like "inch 4K" into "inch4k".
+        """
+        def _collapse(m):
+            prefix = m.group(1).lower()
+            if prefix in MODEL_NUMBER_COMMON_WORDS:
+                return m.group(0)  # leave common words untouched
+            return m.group(1) + m.group(2).replace("-", "")
+        return re.sub(
+            r'\b([A-Za-z]{1,5})[-\s](\d{1,6}[A-Za-z0-9\-]*)\b',
+            _collapse, text, flags=re.IGNORECASE
+        )
+
+    def _extract_model_tokens(self, text: str) -> set:
+        """
+        Extract model-number-like tokens (letter prefix + digits) from text.
+        e.g. "Sony WH-1000XM5" → {"wh1000xm5"}
+             "HP ProBook 450 G10" → {"g10"}
+        Single-digit gen suffixes (G9, M2) are included.
+        """
+        normalised = self._normalise_model_numbers(text.lower())
+        return set(re.findall(r'\b[a-z]{1,5}\d{1,6}[a-z0-9]*\b', normalised))
+
+    def _models_conflict(self, query_models: set, retailer_models: set) -> bool:
+        """
+        Return True if model tokens share a root but differ in suffix —
+        indicating different product variants (XM5 vs XM4, G10 vs G9).
+        Uses a 50% prefix-overlap rule.
+        """
+        for qm in query_models:
+            for rm in retailer_models:
+                if qm == rm:
+                    continue
+                shorter = min(len(qm), len(rm))
+                prefix_len = sum(1 for i in range(shorter) if qm[i] == rm[i])
+                if prefix_len >= max(1, shorter * 0.5):
+                    return True
+        return False
+
     def _fuzzy_score(self, a: str, b: str) -> float:
+        """
+        Improved fuzzy scoring that:
+        1. Normalises model number hyphens (WH-1000XM5 == WH1000XM5)
+        2. Uses max(token_sort, partial, token_set) to catch word-order
+           differences AND substring matches in long retailer titles
+        3. Applies model-number conflict penalty when tokens share a root
+           but differ (XM5 vs XM4 → cap score at LOW)
+        """
         a_norm = self._normalise(a)
         b_norm = self._normalise(b)
-        return fuzz.token_sort_ratio(a_norm, b_norm)
+        base = max(
+            fuzz.token_sort_ratio(a_norm, b_norm),
+            fuzz.partial_ratio(a_norm, b_norm),
+            fuzz.token_set_ratio(a_norm, b_norm),
+        )
+        # Model conflict penalty
+        q_models = self._extract_model_tokens(a)
+        r_models = self._extract_model_tokens(b)
+        if q_models and r_models:
+            if not (q_models & r_models):
+                # Both sides have model numbers but none overlap — different product
+                base = min(base, 45)
+            elif self._models_conflict(q_models, r_models):
+                # Overlapping root but different variant suffix — penalise
+                base = min(base, 40)
+        return base
 
     def _normalise(self, text: str) -> str:
+        text = self._normalise_model_numbers(text)
         text = text.lower()
         text = re.sub(r"[^a-z0-9\s]", " ", text)
         tokens = [t for t in text.split() if t not in STOPWORDS and len(t) > 1]

@@ -19,8 +19,21 @@ SERPAPI_KEY    = os.getenv("SERPAPI_KEY", "")
 SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY", "")
 REDCIRCLE_KEY  = os.getenv("REDCIRCLE_KEY", "")
 
-TIMEOUT         = 15   # seconds — well within CTX 30s limit when concurrent
-WALMART_TIMEOUT = 6    # hard cap: return NOT_FOUND rather than blow the CTX budget
+# Per-retailer timeouts — tight enough to fail fast, not so tight we miss slow APIs
+# asyncio.wait_for wraps each coroutine individually so one slow retailer
+# doesn't block the others (unlike a shared timeout on asyncio.gather).
+AMAZON_TIMEOUT   = 8   # single search call now — no detail call
+WALMART_TIMEOUT  = 6   # ScraperAPI hard cap — Walmart is the slowest
+TARGET_TIMEOUT   = 8
+BESTBUY_TIMEOUT  = 8
+
+def _make_client(timeout: float) -> httpx.AsyncClient:
+    """Create an httpx client with connection pooling and keep-alive enabled."""
+    return httpx.AsyncClient(
+        timeout=httpx.Timeout(timeout, connect=4.0),
+        limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+        http2=False,  # avoid h2 negotiation overhead on SerpApi
+    )
 
 
 # ── Shared helpers ─────────────────────────────────────────────────────────────
@@ -133,7 +146,7 @@ async def fetch_amazon(
     query      = _build_query(base_query, size)
 
     try:
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        async with _make_client(AMAZON_TIMEOUT) as client:
             search_resp = await client.get(
                 "https://serpapi.com/search.json",
                 params={
@@ -148,9 +161,7 @@ async def fetch_amazon(
             )
             search_data = search_resp.json()
 
-            # ── Feature 5: Sponsored filtering ────────────────────────────
-            # SerpApi separates organic_results from ads_results / sponsored_results.
-            # Always use organic_results. Skip any result with is_sponsored=True.
+            # Use organic results only — skip sponsored
             organic = [
                 r for r in search_data.get("organic_results", [])
                 if not r.get("is_sponsored", False)
@@ -158,27 +169,11 @@ async def fetch_amazon(
             if not organic:
                 return {"error": "No organic Amazon results found"}
 
-            top  = organic[0]
-            asin = top.get("asin")
-
-            if asin:
-                detail_resp = await client.get(
-                    "https://serpapi.com/search.json",
-                    params={
-                        "engine":        "amazon_product",
-                        "asin":          asin,
-                        "amazon_domain": "amazon.com",
-                        "gl":            "us",
-                        "hl":            "en",
-                        "location":      "United States",
-                        "api_key":       SERPAPI_KEY,
-                    },
-                )
-                detail_data = detail_resp.json()
-                product = detail_data.get("product_results", {})
-                if product:
-                    return _parse_amazon_product(product, asin)
-
+            # Use search result directly — skip the second detail API call.
+            # The detail call added coupon data but doubled latency (2 serial
+            # SerpApi calls = 16s+ before gather could resolve Amazon).
+            # Search results contain title, price, ASIN and URL — sufficient.
+            top = organic[0]
             return _parse_amazon_search_result(top)
 
     except httpx.TimeoutException:
@@ -266,7 +261,7 @@ async def fetch_best_buy(
     query      = _build_query(base_query, size)
 
     try:
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        async with _make_client(BESTBUY_TIMEOUT) as client:
             resp = await client.get(
                 "https://serpapi.com/search.json",
                 params={
@@ -363,7 +358,7 @@ async def fetch_walmart(
     walmart_search_url = f"https://www.walmart.com/search?q={query.replace(' ', '+')}"
 
     try:
-        async with httpx.AsyncClient(timeout=WALMART_TIMEOUT) as client:
+        async with _make_client(WALMART_TIMEOUT) as client:
             resp = await client.get(
                 "https://api.scraperapi.com/structured/walmart/search",
                 params={
@@ -436,7 +431,7 @@ async def fetch_target(
     query      = _build_query(base_query, size)
 
     try:
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        async with _make_client(TARGET_TIMEOUT) as client:
             resp = await client.get(
                 "https://api.redcircleapi.com/request",
                 params={
