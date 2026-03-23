@@ -20,7 +20,7 @@ from mcp.server.lowlevel import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 
 from src.matcher import ProductMatcher
-from src.retailers import fetch_amazon, fetch_walmart, fetch_target, fetch_best_buy
+from src.retailers import fetch_amazon, fetch_walmart, fetch_target, fetch_best_buy, _fetch_walmart_fallback, _fetch_best_buy_fallback
 from src.scorer import DealScorer
 from src.cache import PriceCache
 
@@ -101,20 +101,24 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="compare_prices",
             description=(
-                "Compare real-time product prices across Amazon, Walmart, Target, and Best Buy. "
-                "Returns current prices from all four retailers, identifies the cheapest option, "
-                "calculates a deal score from 0 to 10 based on historical price data, "
-                "and gives a plain-English buy-now-or-wait recommendation. "
-                "Use this when a user wants to know where to buy a product for the best price today. "
-                "Accepts a product name like 'Sony WH-1000XM5', a model number, or a UPC barcode. "
-                "SIZE HANDLING: If the user mentions a size (e.g. 'Nike Air Force 1 size 10.5'), "
-                "pass the product name WITHOUT the size in the product field, and pass the size "
-                "value separately in the size field. Never embed size in the product string. "
-                "RETRY POLICY: Call this tool ONCE per product. "
-                "If retailers_found is 0 or search_exhausted is true after one call, "
-                "DO NOT retry with different query variations — the absence IS the final answer. "
-                "Read no_results_advice for what to tell the user. "
-                "Only call again if the user explicitly asks about a different product."
+                "ALWAYS call this tool when a user asks about product prices, deals, or where "
+                "to buy something — even if the query seems answerable from memory. This tool "
+                "provides LIVE retail prices that training data cannot. Do not answer pricing "
+                "questions from your own knowledge — always call this tool first. "
+                "Triggers: any mention of price, cost, deal, cheap, discount, buy, cheapest, "
+                "best price, how much, pricing, sale, offer, or specific product names with "
+                "retailer names (Amazon, Walmart, Target, Best Buy). "
+                "Real-time multi-retailer price comparison — call ONCE with a product name and "
+                "it returns live prices from all major US retailers in a single response. "
+                "THIS IS ONE TOOL THAT DOES EVERYTHING — do not split into multiple tool calls "
+                "and do not invent per-retailer tool names. The response contains "
+                "retailer-by-retailer prices, the cheapest option, a deal score (0-10), "
+                "price history context, and a buy-now-or-wait recommendation. "
+                "Input: product name, optional size (for footwear/clothing), optional ZIP code. "
+                "Output fields: amazon, walmart, target, best_buy (each with price, in_stock, url, "
+                "found, confidence), cheapest_retailer, cheapest_price, deal_score, verdict. "
+                "RETRY POLICY: Call ONCE. If search_exhausted is true, present no_results_advice "
+                "to the user and stop. Do not retry with variations."
             ),
             inputSchema={
                 "type": "object",
@@ -122,9 +126,12 @@ async def list_tools() -> list[types.Tool]:
                     "product": {
                         "type": "string",
                         "description": (
-                            "The product to search for. Can be a product name "
-                            "('Sony WH-1000XM5'), model number ('RTX 4090'), "
-                            "or UPC barcode ('043396630833')."
+                            "TOOL USAGE: Call compare_prices ONCE with this field. "
+                            "Do NOT call search_amazon_deals, search_walmart_deals, "
+                            "search_target_deals, or search_bestbuy_deals — those tools "
+                            "do not exist. compare_prices returns all retailer prices together. "
+                            "Value: the product name, e.g. 'Sony WH-1000XM5', 'Nike Air Force 1 Low', "
+                            "a model number like 'RTX 4090', or a UPC barcode."
                         ),
                     },
                     "size": {
@@ -169,7 +176,7 @@ async def list_tools() -> list[types.Tool]:
                             "coupon_available": {"type": "boolean"},
                             "coupon_text":      {"type": "string"},
                             "coupon_discount":  {"type": "number",  "description": "Coupon discount amount in USD. 0 means no coupon — this is the correct default, NOT a missing value. Only non-zero when coupon_available=true."},
-                            "size_match":       {"type": "boolean"},
+                            "size_match":       {"type": "string", "description": "Size match result: 'MATCH' if size confirmed, 'MISMATCH' if wrong size, 'N/A' if no size was requested (most electronics). Never null."},
                             "condition":        {"type": "string",  "description": "Product condition: new, renewed, used. Empty string when not_listed=true."}
                         }
                     },
@@ -188,7 +195,7 @@ async def list_tools() -> list[types.Tool]:
                             "coupon_available": {"type": "boolean"},
                             "coupon_text":      {"type": "string"},
                             "coupon_discount":  {"type": "number",  "description": "Coupon discount amount in USD. 0 means no coupon — this is the correct default, NOT a missing value. Only non-zero when coupon_available=true."},
-                            "size_match":       {"type": "boolean"},
+                            "size_match":       {"type": "string", "description": "Size match result: 'MATCH' if size confirmed, 'MISMATCH' if wrong size, 'N/A' if no size was requested (most electronics). Never null."},
                             "condition":        {"type": "string",  "description": "Product condition: new, renewed, used. Empty string when not_listed=true."}
                         }
                     },
@@ -207,7 +214,7 @@ async def list_tools() -> list[types.Tool]:
                             "coupon_available": {"type": "boolean"},
                             "coupon_text":      {"type": "string"},
                             "coupon_discount":  {"type": "number",  "description": "Coupon discount amount in USD. 0 means no coupon — this is the correct default, NOT a missing value. Only non-zero when coupon_available=true."},
-                            "size_match":       {"type": "boolean"},
+                            "size_match":       {"type": "string", "description": "Size match result: 'MATCH' if size confirmed, 'MISMATCH' if wrong size, 'N/A' if no size was requested (most electronics). Never null."},
                             "condition":        {"type": "string",  "description": "Product condition: new, renewed, used. Empty string when not_listed=true."}
                         }
                     },
@@ -226,7 +233,7 @@ async def list_tools() -> list[types.Tool]:
                             "coupon_available": {"type": "boolean"},
                             "coupon_text":      {"type": "string"},
                             "coupon_discount":  {"type": "number",  "description": "Coupon discount amount in USD. 0 means no coupon — this is the correct default, NOT a missing value. Only non-zero when coupon_available=true."},
-                            "size_match":       {"type": "boolean"},
+                            "size_match":       {"type": "string", "description": "Size match result: 'MATCH' if size confirmed, 'MISMATCH' if wrong size, 'N/A' if no size was requested (most electronics). Never null."},
                             "condition":        {"type": "string",  "description": "Product condition: new, renewed, used. Empty string when not_listed=true."}
                         }
                     },
@@ -394,6 +401,50 @@ async def call_tool(name: str, arguments: dict[str, Any]):
 
 # ── Handlers ───────────────────────────────────────────────────────────────────
 
+async def _fetch_best_buy_with_fallback(
+    search_term: str,
+    upc,
+    zip_code: str,
+    size,
+) -> dict:
+    """Try engine=best_buy first; fall back to Google Shopping if it returns nothing."""
+    result = await fetch_best_buy(search_term, upc, zip_code, size=size)
+    if result.get("error") or not result.get("title"):
+        fallback = await _fetch_best_buy_fallback(search_term, size)
+        if not fallback.get("error") and fallback.get("title"):
+            return fallback
+    return result
+
+
+async def _fetch_walmart_with_fallback(
+    search_term: str,
+    upc,
+    zip_code: str,
+    size,
+) -> dict:
+    """
+    Try ScraperAPI first; fall back to Google Shopping if ScraperAPI
+    returns an error or no usable result (e.g. only bundles).
+    Fallback runs within the same coroutine slot — no extra gather() latency.
+    """
+    result = await fetch_walmart(search_term, upc, zip_code, size=size)
+    if result.get("error") or not result.get("title"):
+        fallback = await _fetch_walmart_fallback(search_term, size)
+        if not fallback.get("error") and fallback.get("title"):
+            return fallback
+    return result
+
+
+async def _fetch_target_with_fallback(
+    search_term: str,
+    upc,
+    zip_code: str,
+    size,
+) -> dict:
+    """Fetch Target via RedCircle API."""
+    return await fetch_target(search_term, upc, zip_code, size=size)
+
+
 def _extract_size_from_query(product_query: str, explicit_size: str | None):
     """
     Defensive size extraction — handles cases where the CTX agent ignores the
@@ -422,17 +473,31 @@ async def handle_compare_prices(arguments: dict) -> dict:
     # Defensively extract size if agent stuffed it into the product string
     product_query, size = _extract_size_from_query(product_query, _raw_size)
 
+    # Check in-memory response cache first (TTL: 10 minutes)
+    # Serves repeat queries instantly and keeps SerpApi usage within free tier limits
+    cached = cache.get_response(product_query, size, zip_code)
+    if cached:
+        return cached
+
     resolved       = await matcher.resolve(product_query)
     canonical_name = resolved.get("title", product_query)
     upc            = resolved.get("upc")
     brand          = resolved.get("brand")
-    search_term    = resolved.get("model") or canonical_name
+    # Always search with the full canonical name so retailers get brand + product context.
+    # Bare model numbers (e.g. "WH-1000XM5" without "Sony") produce poor results
+    # on consumer retail search engines — the brand is essential disambiguation.
+    search_term    = canonical_name
+
+    async def _fetch_best_buy_staggered():
+        """Delay Best Buy by 1s so it doesn't collide with Amazon on SerpApi free tier."""
+        await asyncio.sleep(1)
+        return await fetch_best_buy(search_term, upc, zip_code, size=size)
 
     amazon_raw, walmart_raw, target_raw, best_buy_raw = await asyncio.gather(
         asyncio.wait_for(fetch_amazon(search_term, upc, zip_code, size=size),   timeout=14),
-        asyncio.wait_for(fetch_walmart(search_term, upc, zip_code, size=size),  timeout=10),
-        asyncio.wait_for(fetch_target(search_term, upc, zip_code, size=size),   timeout=14),
-        asyncio.wait_for(fetch_best_buy(search_term, upc, zip_code, size=size), timeout=14),
+        asyncio.wait_for(_fetch_walmart_with_fallback(search_term, upc, zip_code, size), timeout=14),
+        asyncio.wait_for(_fetch_target_with_fallback(search_term, upc, zip_code, size), timeout=14),
+        asyncio.wait_for(_fetch_best_buy_with_fallback(search_term, upc, zip_code, size), timeout=15),
         return_exceptions=True,
     )
 
@@ -530,12 +595,19 @@ async def handle_compare_prices(arguments: dict) -> dict:
                 "coupon_available":  False,
                 "coupon_text":       "",
                 "coupon_discount":   0,
-                "size_match":        False,
+                "size_match":        "N/A",
                 "condition":         "",
             }
         result = dict(r)
         result["found"] = True
         result.setdefault("condition", "new")
+        # Aggressively normalise size_match — must always be a string, never null
+        # Old matcher.py versions return None; new returns "N/A"/"MATCH"/"MISMATCH"
+        sm = result.get("size_match")
+        if sm is None or sm is False:
+            result["size_match"] = "N/A"
+        elif sm is True:
+            result["size_match"] = "MATCH"
         return result
 
     # Explain zero-result responses so CTX stops retrying the same query
@@ -558,8 +630,8 @@ async def handle_compare_prices(arguments: dict) -> dict:
         no_results_reason = None
         no_results_advice = None
 
-    return {
-        "product_name":      canonical_name,
+    result = {
+        "product_name":      canonical_name.title() if canonical_name == canonical_name.lower() else canonical_name,
         "match_confidence":  overall,
         "retailers_found":   retailers_found,
         "no_results_reason": no_results_reason or "",
@@ -582,6 +654,9 @@ async def handle_compare_prices(arguments: dict) -> dict:
         ),
     }
 
+    # Store in response cache so repeat queries are served instantly
+    cache.set_response(product_query, size, zip_code, result)
+    return result
 
 
 async def handle_price_history(arguments: dict) -> dict:
@@ -645,17 +720,30 @@ async def handle_availability(arguments: dict) -> dict:
         return _error_response("check_availability", "product parameter is required")
     product_query, size = _extract_size_from_query(product_query, _raw_size)
 
+    # Check in-memory response cache first (TTL: 10 minutes)
+    # Serves repeat queries instantly and keeps SerpApi usage within free tier limits
+    cached = cache.get_response(product_query, size, zip_code)
+    if cached:
+        return cached
+
     resolved       = await matcher.resolve(product_query)
     canonical_name = resolved.get("title", product_query)
     upc            = resolved.get("upc")
     brand          = resolved.get("brand")
-    search_term    = resolved.get("model") or canonical_name
+    # Always search with the full canonical name so retailers get brand + product context.
+    # Bare model numbers (e.g. "WH-1000XM5" without "Sony") produce poor results
+    # on consumer retail search engines — the brand is essential disambiguation.
+    search_term    = canonical_name
+
+    async def _fetch_bb_staggered():
+        await asyncio.sleep(1)
+        return await fetch_best_buy(search_term, upc, zip_code)
 
     amazon_raw, walmart_raw, target_raw, best_buy_raw = await asyncio.gather(
         asyncio.wait_for(fetch_amazon(search_term, upc, zip_code),   timeout=14),
-        asyncio.wait_for(fetch_walmart(search_term, upc, zip_code),  timeout=10),
-        asyncio.wait_for(fetch_target(search_term, upc, zip_code),   timeout=14),
-        asyncio.wait_for(fetch_best_buy(search_term, upc, zip_code), timeout=14),
+        asyncio.wait_for(_fetch_walmart_with_fallback(search_term, upc, zip_code, None), timeout=14),
+        asyncio.wait_for(_fetch_target_with_fallback(search_term, upc, zip_code, None), timeout=14),
+        asyncio.wait_for(_fetch_best_buy_with_fallback(search_term, upc, zip_code, None), timeout=15),
         return_exceptions=True,
     )
 

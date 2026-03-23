@@ -12,6 +12,7 @@ from starlette.requests import Request
 from starlette.types import Receive, Scope, Send
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from server import server
+from ctxprotocol import verify_context_request, is_protected_mcp_method, ContextError
 
 # ── Session manager ───────────────────────────────────────────────────────────
 session_manager = StreamableHTTPSessionManager(
@@ -71,7 +72,68 @@ class MCPRouter:
         await self.fallback(scope, receive, send)
 
 async def handle_mcp(scope: Scope, receive: Receive, send: Send):
-    await session_manager.handle_request(scope, receive, send)
+    """
+    MCP request handler with CTX Protocol authentication.
+    - tools/call requires a valid CTX JWT (protects paid execution)
+    - tools/list, initialize etc. pass through freely (discovery)
+    """
+    if scope["type"] != "http":
+        await session_manager.handle_request(scope, receive, send)
+        return
+
+    # Read the request body to inspect the MCP method
+    body_chunks = []
+    more_body = True
+    while more_body:
+        message = await receive()
+        body_chunks.append(message.get("body", b""))
+        more_body = message.get("more_body", False)
+    raw_body = b"".join(body_chunks)
+
+    # Parse JSON to get MCP method name
+    import json as _json
+    try:
+        mcp_body = _json.loads(raw_body) if raw_body else {}
+    except Exception:
+        mcp_body = {}
+
+    method = mcp_body.get("method", "")
+
+    # Only verify auth for protected methods (tools/call)
+    if is_protected_mcp_method(method):
+        # Extract Authorization header from scope
+        headers = dict(scope.get("headers", []))
+        auth_header = headers.get(b"authorization", b"").decode("utf-8")
+
+        try:
+            await verify_context_request(
+                authorization_header=auth_header,
+                audience=os.getenv("CTX_AUDIENCE", ""),
+            )
+        except ContextError:
+            # Return 401 Unauthorized
+            response_body = _json.dumps({
+                "jsonrpc": "2.0",
+                "error": {"code": -32001, "message": "Unauthorized — valid CTX token required"},
+                "id": mcp_body.get("id"),
+            }).encode()
+            await _send_response(scope, send, 401, response_body)
+            return
+
+    # Auth passed (or not required) — replay body to session manager
+    async def patched_receive():
+        return {"type": "http.request", "body": raw_body, "more_body": False}
+
+    await session_manager.handle_request(scope, patched_receive, send)
+
+
+async def _send_response(scope: Scope, send, status: int, body: bytes):
+    await send({
+        "type": "http.response.start",
+        "status": status,
+        "headers": [[b"content-type", b"application/json"]],
+    })
+    await send({"type": "http.response.body", "body": body})
 
 app = MCPRouter(mcp_handler=handle_mcp, fallback=inner_app)
 

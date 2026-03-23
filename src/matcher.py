@@ -118,13 +118,24 @@ MODEL_NUMBER_COMMON_WORDS = {
     'pro',  'max',  'mini', 'plus', 'ultra', 'slim', 'lite',
 }
 
-ACCESSORY_KEYWORDS = [
-    "case", "cover", "screen protector", "tempered glass", "charger",
-    "cable", "stand", "skin", "sleeve", "pouch", "holder", "mount",
-    "adapter", "dock", "stylus", "protector", "bumper", "shell",
-    "wallet", "folio", "kickstand", "magsafe", "band", "strap",
-    "film", "wrap", "decal", "sticker", "clip", "hook", "grip",
+# Keywords that unambiguously identify an accessory anywhere in the title
+ACCESSORY_KEYWORDS_STRICT = [
+    "screen protector", "tempered glass", "skin", "sleeve", "pouch",
+    "holder", "mount", "stylus", "bumper", "shell", "wallet", "folio",
+    "kickstand", "film", "wrap", "decal", "sticker", "clip", "hook", "grip",
+    "carrying case", "ear cushion", "ear pad", "earcup", "ear cup",
+    "replacement pad", "replacement cushion",
 ]
+
+# Keywords that signal an accessory only when they START the title
+# e.g. "Case for AirPods Pro" = accessory, but "AirPods Pro MagSafe Charging Case" = product
+ACCESSORY_IF_LEADING = [
+    "case", "cover", "cable", "charger", "adapter", "dock",
+    "stand", "band", "strap", "replacement",
+]
+
+# Legacy alias kept for any external references
+ACCESSORY_KEYWORDS = ACCESSORY_KEYWORDS_STRICT
 
 
 class ProductMatcher:
@@ -420,9 +431,17 @@ class ProductMatcher:
 
     def _is_accessory_mismatch(self, query: str, retailer_title: str) -> bool:
         """
-        Returns True ONLY if the result is clearly an accessory FOR the queried
-        product — shares query words but adds an accessory keyword.
-        Does NOT flag completely unrelated products (that's the semantic layer's job).
+        Returns True ONLY if the result is clearly an accessory FOR the queried product.
+
+        Uses three-tier detection:
+        1. Strict keywords — unambiguous accessories anywhere in title
+           (screen protector, carrying case, ear cushion, etc.)
+        2. Leading keywords — only accessories when title STARTS with them
+           ("Case for AirPods Pro" = accessory, "AirPods Pro MagSafe Charging Case" = product)
+        3. "<accessory> for <product>" pattern anywhere in title
+
+        Key fix: "magsafe", "case", "cable" removed from blanket rejection list.
+        Apple products include "MagSafe Charging Case" in their official product name.
         """
         query_lower = query.lower()
         title_lower = retailer_title.lower()
@@ -431,13 +450,26 @@ class ProductMatcher:
         query_words = [w for w in re.findall(r"[a-z0-9]+", query_lower)
                        if len(w) >= 3 and w not in stopwords]
 
-        title_contains_query_words = any(w in title_lower for w in query_words)
-        if not title_contains_query_words:
+        # Must share words with the query to be relevant
+        if not any(w in title_lower for w in query_words):
             return False
 
-        for keyword in ACCESSORY_KEYWORDS:
+        # Tier 1: strict keywords — reject anywhere in title
+        for keyword in ACCESSORY_KEYWORDS_STRICT:
             if keyword in title_lower and keyword not in query_lower:
                 return True
+
+        # Tier 2: leading keywords — only reject when title starts with them
+        for keyword in ACCESSORY_IF_LEADING:
+            if keyword in title_lower and keyword not in query_lower:
+                if title_lower.startswith(keyword) or title_lower[:15].strip().startswith(keyword):
+                    return True
+
+        # Tier 3: "<keyword> for <product>" pattern = accessory
+        accessory_for_pattern = r'\b(cable|charger|adapter|stand|dock|cover|case|band|strap)\s+for\b'
+        if re.search(accessory_for_pattern, title_lower):
+            return True
+
         return False
 
     def _check_size_match(self, requested_size: str, title: str) -> bool | None:

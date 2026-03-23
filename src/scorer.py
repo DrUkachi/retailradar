@@ -81,7 +81,10 @@ class DealScorer:
             )
 
         parts = []
-        retailer_cap = cheapest_retailer.capitalize()
+        # Convert internal retailer key to display name
+        _display = {"best_buy": "Best Buy", "amazon": "Amazon",
+                    "walmart": "Walmart", "target": "Target"}
+        retailer_cap = _display.get(cheapest_retailer.lower(), cheapest_retailer.replace("_", " ").title())
 
         # Part 1: Cheapest retailer finding
         if len(valid_prices) == 1:
@@ -97,7 +100,7 @@ class DealScorer:
             max_retailer = max(valid_prices, key=valid_prices.get)
             max_price    = valid_prices[max_retailer]
             parts.append(
-                f"That's {price_spread_pct}% cheaper than {max_retailer.capitalize()} "
+                f"That's {price_spread_pct}% cheaper than {_display.get(max_retailer.lower(), max_retailer.replace('_', ' ').title())} "
                 f"(${max_price:,.2f})."
             )
 

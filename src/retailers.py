@@ -11,9 +11,12 @@ and used by the matcher to validate variant correctness.
 """
 
 import os
+import logging
 import re
 import httpx
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 SERPAPI_KEY    = os.getenv("SERPAPI_KEY", "")
 SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY", "")
@@ -65,6 +68,61 @@ def _parse_price(price_str: str, max_usd: float = 50_000.0) -> Optional[float]:
         return value
     except ValueError:
         return None
+
+def _extract_serpapi_price(result: dict, max_usd: float = 50_000.0) -> Optional[float]:
+    """
+    Robustly extract price from a SerpApi organic result dict.
+    SerpApi returns prices in multiple formats depending on the engine and product:
+      - {"price": {"value": "279.99"}}   — nested dict with value key
+      - {"price": {"raw": "$279.99"}}    — nested dict with raw key
+      - {"price": "$279.99"}             — string with currency symbol
+      - {"price": 279.99}                — bare float
+      - {"extracted_price": 279.99}      — top-level extracted_price field
+      - {"price_string": "$279.99"}      — price_string field
+    """
+    # Try top-level extracted_price first (most reliable)
+    extracted = result.get("extracted_price")
+    if isinstance(extracted, (int, float)) and 0 < extracted < max_usd:
+        return round(float(extracted), 2)
+
+    price_raw = result.get("price")
+
+    # Nested dict
+    if isinstance(price_raw, dict):
+        for key in ("value", "raw", "extracted", "amount"):
+            val = price_raw.get(key)
+            if val is not None:
+                cleaned = re.sub(r"[^\d.]", "", str(val))
+                try:
+                    v = round(float(cleaned), 2) if cleaned else None
+                    if v and 0 < v < max_usd:
+                        return v
+                except ValueError:
+                    pass
+
+    # String or numeric
+    if price_raw is not None and not isinstance(price_raw, dict):
+        cleaned = re.sub(r"[^\d.]", "", str(price_raw))
+        try:
+            v = round(float(cleaned), 2) if cleaned else None
+            if v and 0 < v < max_usd:
+                return v
+        except ValueError:
+            pass
+
+    # Try price_string field
+    price_string = result.get("price_string") or result.get("price_str") or ""
+    if price_string:
+        cleaned = re.sub(r"[^\d.]", "", str(price_string))
+        try:
+            v = round(float(cleaned), 2) if cleaned else None
+            if v and 0 < v < max_usd:
+                return v
+        except ValueError:
+            pass
+
+    return None
+
 
 def _build_query(search_term: str, size: Optional[str]) -> str:
     """Append size to search query when provided, e.g. 'Air Jordan 1 Low size 11'."""
@@ -223,7 +281,7 @@ def _parse_amazon_product(product: dict, asin: str) -> dict:
 
 def _parse_amazon_search_result(result: dict) -> dict:
     title = result.get("title", "")
-    price = _parse_price(str(result.get("price", {}).get("value", "")))
+    price = _extract_serpapi_price(result)
     return {
         "title":            title,
         "price":            price,
@@ -262,11 +320,14 @@ async def fetch_best_buy(
 
     try:
         async with _make_client(BESTBUY_TIMEOUT) as client:
+            # Use Google Shopping with site:bestbuy.com in query
+            # More reliable than engine=best_buy (unofficial/inconsistent)
+            # or merchant ID filter (returns empty for many products)
             resp = await client.get(
                 "https://serpapi.com/search.json",
                 params={
-                    "engine":  "best_buy",
-                    "q":       query,
+                    "engine":  "google_shopping",
+                    "q":       f"{query} site:bestbuy.com",
                     "gl":      "us",
                     "hl":      "en",
                     "api_key": SERPAPI_KEY,
@@ -274,17 +335,24 @@ async def fetch_best_buy(
             )
             data = resp.json()
 
-            # SerpApi Best Buy returns results under 'organic_results'
+            # Filter to Best Buy sourced results only
             results = [
-                r for r in data.get("organic_results", [])
+                r for r in data.get("shopping_results", [])
                 if not r.get("is_sponsored", False)
+                and "best buy" in (r.get("source", "") or "").lower()
             ]
+            # Fallback: any non-sponsored shopping result
+            if not results:
+                results = [
+                    r for r in data.get("shopping_results", [])
+                    if not r.get("is_sponsored", False)
+                ]
             if not results:
                 return {"error": "No Best Buy results found"}
 
             top   = results[0]
             title = top.get("title", "")
-            price = _parse_price(str(
+            price = _extract_serpapi_price(top) or _parse_price(str(
                 top.get("price") or
                 top.get("sale_price") or
                 top.get("regular_price") or ""
@@ -314,7 +382,12 @@ async def fetch_best_buy(
             if isinstance(in_stock, str):
                 in_stock = in_stock.lower() not in ("false", "out of stock", "unavailable")
 
-            url = top.get("link") or top.get("url") or ""
+            # Prefer actual Best Buy product URL over Google Shopping redirect
+            raw_url = top.get("product_link") or top.get("url") or top.get("link") or ""
+            if raw_url and "bestbuy.com" in raw_url:
+                url = raw_url
+            else:
+                url = f"https://www.bestbuy.com/site/searchpage.jsp?st={query.replace(' ', '+')}"
 
             return {
                 "title":            title,
@@ -335,6 +408,70 @@ async def fetch_best_buy(
         return {"error": f"Best Buy fetch error: {str(e)}"}
 
 
+async def _fetch_best_buy_fallback(
+    search_term: str,
+    size: Optional[str],
+) -> dict:
+    """
+    Fallback: fetch Best Buy pricing via Google Shopping with Best Buy merchant filter.
+    Used when engine=best_buy returns no results (inconsistent SerpApi engine).
+    Best Buy merchant ID on Google Shopping: m100000125
+    """
+    if not SERPAPI_KEY:
+        return {"error": "SERPAPI_KEY not configured"}
+
+    query = _build_query(search_term, size)
+
+    try:
+        async with _make_client(BESTBUY_TIMEOUT) as client:
+            resp = await client.get(
+                "https://serpapi.com/search.json",
+                params={
+                    "engine":  "google_shopping",
+                    "q":       query + " Best Buy",  # site-hint in query
+                    "gl":      "us",
+                    "hl":      "en",
+                    "api_key": SERPAPI_KEY,
+                },
+            )
+            data = resp.json()
+
+            results = [
+                r for r in data.get("shopping_results", [])
+                if not r.get("is_sponsored", False)
+                and "best buy" in (r.get("source", "") or "").lower()
+            ]
+            if not results:
+                results = [
+                    r for r in data.get("shopping_results", [])
+                    if not r.get("is_sponsored", False)
+                ]
+            if not results:
+                return {"error": "No Best Buy results via Google Shopping fallback"}
+
+            top   = results[0]
+            title = top.get("title", "")
+            price = _extract_serpapi_price(top)
+            url   = (top.get("product_link") or top.get("link") or
+                     f"https://www.bestbuy.com/site/searchpage.jsp?st={query.replace(' ', '+')}")
+
+            return {
+                "title":            title,
+                "price":            price,
+                "currency":         "USD",
+                "in_stock":         True,
+                "condition":        _detect_condition(title),
+                "coupon_available": False,
+                "coupon_text":      "",
+                "coupon_discount":  0,
+                "effective_price":  price,
+                "url":              url,
+            }
+
+    except Exception as e:
+        return {"error": f"Best Buy fallback error: {str(e)}"}
+
+
 # ── Walmart via ScraperAPI ─────────────────────────────────────────────────────
 
 async def fetch_walmart(
@@ -351,10 +488,11 @@ async def fetch_walmart(
     if not SCRAPERAPI_KEY:
         return {"error": "SCRAPERAPI_KEY not configured"}
 
-    raw_query   = upc if upc else search_term
-    model_match = re.search(r"[A-Z]{1,5}[-_]?[0-9]{2,6}[A-Z0-9-]*", search_term, re.IGNORECASE)
-    base_query  = model_match.group(0) if model_match and not upc else raw_query
-    query       = _build_query(base_query, size)
+    # Use the full search_term (canonical product name) — do NOT strip to model number only.
+    # Bare model numbers like "WH-1000XM5" without "Sony" cause Walmart to return
+    # wrong products (accessories, bundles, successor models).
+    raw_query = upc if upc else search_term
+    query     = _build_query(raw_query, size)
     walmart_search_url = f"https://www.walmart.com/search?q={query.replace(' ', '+')}"
 
     try:
@@ -375,10 +513,31 @@ async def fetch_walmart(
             if not organic:
                 return {"error": f"No Walmart results found (keys: {list(data.keys()) if isinstance(data, dict) else []})"}
 
-            top       = organic[0]
+            # Pick best result from top 5 using fuzzy title matching.
+            # This is dynamic — no hardcoded bundle keywords needed.
+            # A standalone product ("Sony WH-1000XM5 Headphones") scores higher
+            # than a bundle ("Sony WH-1000XM5 + Protection Plan + Power Bank")
+            # because bundle titles add noise tokens that don't match the query.
+            from rapidfuzz import fuzz as _fuzz
+
+            def _quick_score(query_str: str, title: str) -> float:
+                """Fast token_set_ratio — handles word order and extra tokens."""
+                q = query_str.lower()
+                t = title.lower()
+                return _fuzz.token_set_ratio(q, t)
+
+            candidates = organic[:5]
+            scored = [
+                (candidate, _quick_score(search_term, candidate.get("name") or candidate.get("title") or ""))
+                for candidate in candidates
+            ]
+            # Sort by score descending — best match first
+            scored.sort(key=lambda x: x[1], reverse=True)
+            top = scored[0][0]
+
             title     = top.get("name") or top.get("title") or ""
             raw_price = top.get("price") or top.get("sale_price") or ""
-            price     = _parse_price(str(raw_price))
+            price     = _parse_price(str(raw_price)) or _extract_serpapi_price(top)
             in_stock  = (
                 top.get("available_for_delivery")
                 or top.get("in_stock")
@@ -413,6 +572,82 @@ async def fetch_walmart(
         return {"error": f"Walmart fetch error: {str(e)}"}
 
 
+async def _fetch_walmart_fallback(
+    search_term: str,
+    size: Optional[str],
+) -> dict:
+    """
+    Fallback: fetch Walmart pricing via Google Shopping with Walmart merchant filter.
+    Used when ScraperAPI returns no usable result (e.g. only bundles or wrong model).
+    Walmart merchant ID on Google Shopping: m107903633
+    Runs WITHIN the Walmart coroutine slot — does not extend total gather() time.
+    """
+    if not SERPAPI_KEY:
+        return {"error": "SERPAPI_KEY not configured"}
+
+    query = _build_query(search_term, size)
+
+    try:
+        async with _make_client(WALMART_TIMEOUT) as client:
+            resp = await client.get(
+                "https://serpapi.com/search.json",
+                params={
+                    "engine":  "google_shopping",
+                    "q":       query + " Walmart",  # site-hint in query
+                    "gl":      "us",
+                    "hl":      "en",
+                    "api_key": SERPAPI_KEY,
+                },
+            )
+            data = resp.json()
+
+            results = [
+                r for r in data.get("shopping_results", [])
+                if not r.get("is_sponsored", False)
+                and "walmart" in (r.get("source", "") or "").lower()
+            ]
+            if not results:
+                results = [
+                    r for r in data.get("shopping_results", [])
+                    if not r.get("is_sponsored", False)
+                ]
+            if not results:
+                return {"error": "No Walmart results via Google Shopping fallback"}
+
+            # Pick best match by fuzzy score — avoids bundles dynamically
+            from rapidfuzz import fuzz as _fuzz
+            results_scored = sorted(
+                results,
+                key=lambda r: _fuzz.token_set_ratio(search_term.lower(), (r.get("title") or "").lower()),
+                reverse=True
+            )
+            top   = results_scored[0]
+            title = top.get("title", "")
+            price = _extract_serpapi_price(top)
+            # Prefer direct walmart.com product URL; never use Google redirect as the URL
+            raw_url = top.get("product_link") or top.get("link") or ""
+            if raw_url and "walmart.com" in raw_url:
+                url = raw_url
+            else:
+                url = f"https://www.walmart.com/search?q={query.replace(' ', '+')}"
+
+            return {
+                "title":            title,
+                "price":            price,
+                "currency":         "USD",
+                "in_stock":         True,
+                "condition":        _detect_condition(title),
+                "coupon_available": False,
+                "coupon_text":      "",
+                "coupon_discount":  0,
+                "effective_price":  price,
+                "url":              url,
+            }
+
+    except Exception as e:
+        return {"error": f"Walmart fallback error: {str(e)}"}
+
+
 # ── Target via RedCircle API ───────────────────────────────────────────────────
 
 async def fetch_target(
@@ -442,10 +677,24 @@ async def fetch_target(
                     "zip_code":    zip_code,
                 },
             )
+            if resp.status_code == 401:
+                return {"error": "Target API: REDCIRCLE_KEY is invalid or expired. Renew at redcircleapi.com"}
+            if resp.status_code == 403:
+                return {"error": "Target API: REDCIRCLE_KEY access denied — check plan limits at redcircleapi.com"}
+            if resp.status_code != 200:
+                return {"error": f"Target API error: HTTP {resp.status_code}"}
+
             data    = resp.json()
+
+            # Handle RedCircle auth failure response
+            request_info = data.get("request_info", {})
+            if not request_info.get("success", True):
+                return {"error": f"Target API failed: {request_info.get('message', 'unknown error')}"}
+
             results = data.get("search_results", [])
+            logger.info(f"RedCircle Target: HTTP {resp.status_code}, keys={list(data.keys())}, results={len(results)}")
             if not results:
-                return {"error": "No Target results found"}
+                return {"error": f"No Target results found. Response keys: {list(data.keys())}"}
 
             top   = results[0].get("product", {})
             offer = results[0].get("offers", {}).get("primary", {})
@@ -480,4 +729,3 @@ async def fetch_target(
         return {"error": "Target request timed out"}
     except Exception as e:
         return {"error": f"Target fetch error: {str(e)}"}
-    #for railway push
